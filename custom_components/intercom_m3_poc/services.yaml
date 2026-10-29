@@ -1,0 +1,61 @@
+room_call:
+  name: Call rooms
+  description: Start a call from one room to other rooms.
+  fields:
+    source:
+      name: Source room ID
+      required: true
+      selector:
+        text:
+    target_room_ids:
+      name: Target room IDs
+      required: true
+      selector:
+        text:
+          multiple: true
+    mode:
+      name: Call mode
+      default: full_duplex
+      selector:
+        select:
+          options:
+            - full_duplex
+            - speaker_only
+    answer_policy:
+      name: Answer policy
+      default: drop_in
+      selector:
+        select:
+          options:
+            - drop_in
+            - ring
+hangup:
+  name: Hang up
+  description: End a call by its ID.
+  fields:
+    call_id:
+      name: Call ID
+      required: true
+      selector:
+        text:
+announce:
+  name: Announce
+  description: Send an announcement to room IDs or a group ID.
+  fields:
+    target_room_ids:
+      name: Target room IDs
+      description: Specify room IDs or a group ID, not both.
+      selector:
+        text:
+          multiple: true
+    group_id:
+      name: Group ID
+      description: Specify a group ID or room IDs, not both.
+      selector:
+        text:
+    source:
+      name: Announcement source
+      description: A file or local text-to-speech source object.
+      required: true
+      selector:
+        object:

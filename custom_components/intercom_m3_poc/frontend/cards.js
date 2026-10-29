@@ -1,5 +1,5 @@
-import "./manager.js?v=0.4.2";
-import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.2";
+import "./manager.js?v=0.4.3";
+import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.3";
 
 class IntercomRoomCard extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }); this.audio = document.createElement("intercom-m3-poc-panel"); this.shadowRoot.append(this.audio); }

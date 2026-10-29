@@ -1,5 +1,5 @@
-import "./panel.js?v=0.4.2";
-import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.2";
+import "./panel.js?v=0.4.3";
+import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.3";
 
 const pages = ["Overview", "Call", "Rooms", "Speakers", "People", "Announcements", "History", "Settings", "Diagnostics"];
 const clone = value => JSON.parse(JSON.stringify(value));

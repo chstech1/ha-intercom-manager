@@ -1,6 +1,6 @@
 # Provenance and licensing
 
-This development alpha contains the project's Home Assistant integration, JavaScript/HTML frontend and eight-file public firmware kit, exported from its 0.4.2 source. It preserves the internal `intercom_m3_poc` domain for compatibility. Repository: https://github.com/chstech1/ha-intercom-manager.
+This development alpha contains the project's Home Assistant integration, JavaScript/HTML frontend and eight-file public firmware kit, exported from its 0.4.3 source. It preserves the internal `intercom_m3_poc` domain for compatibility. Repository: https://github.com/chstech1/ha-intercom-manager.
 
 Project-authored integration, frontend, helpers, attention tone, icon and project modifications are licensed under Apache-2.0; see [LICENSE](LICENSE). Upstream and embedded third-party components retain the licenses and notices described below.
 

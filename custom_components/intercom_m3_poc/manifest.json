@@ -17,7 +17,7 @@
     "asyncssh==2.24.1"
   ],
   "single_config_entry": true,
-  "version": "0.4.2",
+  "version": "0.4.3",
   "documentation": "https://github.com/chstech1/ha-intercom-manager",
   "issue_tracker": "https://github.com/chstech1/ha-intercom-manager/issues"
 }

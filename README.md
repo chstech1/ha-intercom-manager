@@ -2,9 +2,9 @@
 
 Home Assistant integration with a sidebar for room enrollment, permissions, calls, announcements, history and diagnostics.
 
-**Development alpha 0.4.2 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This tree is prepared for HACS custom-repository installation. It has not been downloaded or installed through HACS.
+**Development alpha 0.4.3 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This candidate is prepared for HACS custom-repository installation; 0.4.3 live acceptance remains pending.
 
-Version 0.4.2 adds standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and keeps all eight firmware files unchanged. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
+Version 0.4.3 adds descriptions for the existing Home Assistant actions. Version 0.4.2 added standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and keeps all eight firmware files unchanged. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
 
 ## Alpha requirements and limits
 
