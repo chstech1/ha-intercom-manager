@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Intercom JavaScript dashboard integration</title>
+<style>body{max-width:800px;margin:40px auto;padding:20px;font:17px/1.6 system-ui;color:#172536}pre{white-space:pre-wrap;background:#f1f4f8;padding:20px;border-radius:12px}a{color:#1769aa}</style>
+<h1>Intercom in your Home Assistant dashboard</h1>
+<p>The widget runs in an authenticated Home Assistant custom panel or dashboard. Pass that host's <code>hass</code> object. A standalone HTML page cannot access another page's HA session or start a call.</p>
+<p><a href="/intercom-m3-poc">Open Intercom Manager</a></p>
+<h2>Home Assistant custom cards</h2>
+<p>Add <code>/intercom_m3_poc/cards.js?v=0.4.1</code> as a JavaScript module resource in Dashboard settings, then add a manual card:</p>
+<pre>type: custom:intercom-overview-card
+title: Intercom rooms
+
+# Or add call controls, optionally preselecting an enrolled UUID:
+type: custom:intercom-room-card
+device_id: YOUR_ENROLLED_DEVICE_UUID</pre>
+<h2>HTML/JavaScript custom dashboard host</h2>
+<p>Inside your HA custom element, after HA supplies <code>this.hass</code> and your widget host exists:</p>
+<pre>import { mountIntercomWidget } from "/intercom_m3_poc/cards.js?v=0.4.1";
+import { IntercomManagerClient } from "/intercom_m3_poc/client.js?v=0.4.1";
+
+const mounted = mountIntercomWidget(hostElement, this.hass, {
+  view: "call", // or "overview", "manager"
+  device_id: "YOUR_ENROLLED_DEVICE_UUID"
+});
+// In your HA setter:
+mounted.updateHass(newHass);
+// On destruction/navigation, remove to stop media and release the mic:
+mounted.remove();
+
+const client = new IntercomManagerClient(this.hass);
+const { rooms } = await client.snapshot();
+// Administrator configuration edits include the revision automatically:
+const config = await client.configuration();
+if (config.rooms.length) {
+  config.rooms[0].dnd = true;
+  await client.update(config);
+}
+// An empty manager is valid. Use Rooms in Intercom Manager to configure it.</pre>
+<p>Do not put access tokens in HTML, URLs or browser storage. Use the HA host and the shared permission-checked controls. Browser calls require trusted HTTPS, a foreground page, microphone permission and an explicit CALL gesture. Removing the widget, hiding the page or losing its control connection ends media.</p>
+<p>Removal: delete custom cards and the cards.js dashboard resource; remove the integration entry to disable its sidebar and API. No iframe or cross-origin authentication shortcut is provided.</p>
+</html>

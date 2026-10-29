@@ -1,0 +1,82 @@
+{
+  "title": "Intercom Manager",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Intercom Manager",
+        "description": "Creates an empty, removable manager with silence controls and a panel. Choose explicit users and trusted HTTPS origins, then configure rooms and permissions in Intercom Manager.",
+        "data": {
+          "allowed_user_ids": "Allowed Home Assistant users",
+          "internal_origin": "Trusted internal HTTPS origin (optional)",
+          "nabu_origin": "Existing Nabu Casa HTTPS origin (optional)"
+        }
+      }
+    },
+    "error": {
+      "invalid_origin": "Enter at least one origin as an HTTPS origin without a path, query, credentials, or fragment.",
+      "invalid_users": "Choose at least one active, non-system Home Assistant user.",
+      "invalid_room_name": "Enter a room name from 1 to 64 characters without control characters."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Intercom Manager entry is allowed."
+    }
+  },
+  "options": {
+    "abort": {
+      "manage_rooms": "Manage rooms in the Intercom Manager sidebar panel.",
+      "deployment_unavailable": "Speaker deployment is unavailable. Existing room controls remain available in Intercom Manager.",
+      "no_speakers": "No speaker connections are configured. Choose Add a speaker connection first.",
+      "deployment_changed": "Speaker configuration changed during this form. Open Configure again to use the current version.",
+      "speaker_connection_saved": "Speaker connection saved privately. Open Speakers in Intercom Manager to check the connection and prepare installation. No speaker changes were made."
+    },
+    "step": {
+      "manager": {
+        "title": "Configure Intercom Manager",
+        "menu_options": {
+          "speaker": "Add a speaker connection",
+          "select_speaker": "Update an existing speaker connection",
+          "rooms": "Manage rooms and calls"
+        }
+      },
+      "select_speaker": {
+        "title": "Choose a speaker connection",
+        "data": {"device_id": "Speaker"}
+      },
+      "speaker": {
+        "title": "Private speaker connection",
+        "description": "For the supported Third Reality 3RAB01090D speaker. Enter its private IPv4 address, Wi-Fi MAC address, independently verified SSH SHA-256 fingerprint and root SSH password. These are stored privately on this Home Assistant, outside the integration package. Saving does not connect, install, restart or change the speaker. Updating a connection requires the same physical identity and a newly entered password.",
+        "data": {
+          "label": "Speaker name",
+          "host": "Private IPv4 address",
+          "mac": "Wi-Fi MAC address",
+          "host_key_sha256": "Verified SSH fingerprint (SHA256:...)",
+          "password": "Speaker SSH password"
+        }
+      },
+      "init": {
+        "title": "Select the initial room backend",
+        "description": "Choose simulation or configure the authenticated endpoint. Simulation remains available for rollback.",
+        "data": {"backend": "Backend", "room_name": "Room name"}
+      },
+      "endpoint": {
+        "title": "Configure the authenticated endpoint",
+        "description": "Enter endpoint identity and trust-file paths from the disposable Home Assistant lab. This form validates local metadata and files without connecting to the endpoint.",
+        "data": {
+          "endpoint_host": "Endpoint host",
+          "endpoint_port": "Endpoint port",
+          "expected_endpoint_uuid": "Endpoint UUID",
+          "expected_endpoint_spki_sha256": "Endpoint SPKI SHA-256 pin",
+          "endpoint_ca_path": "CA certificate path",
+          "endpoint_client_cert_path": "Home Assistant client certificate path",
+          "endpoint_client_key_path": "Home Assistant client key path"
+        }
+      }
+    },
+    "error": {
+      "invalid_speaker": "Check the private IPv4 address, MAC address, verified SSH fingerprint and password.",
+      "speaker_configuration_failed": "The speaker connection could not be saved. Check for a duplicate speaker or an operation in progress, then open Configure again.",
+      "invalid_endpoint": "Check the host, port, UUID, SHA-256 pin, and all three local trust-file paths.",
+      "invalid_room_name": "Enter a room name from 1 to 64 characters without control characters."
+    }
+  }
+}

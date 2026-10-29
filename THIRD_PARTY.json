@@ -1,0 +1,157 @@
+{
+  "format": "bounded provenance inventory; not a complete SBOM or license clearance",
+  "version": "0.4.1",
+  "publication_status": "OWNER_APPROVED_PUBLIC_APACHE_2_0_ALPHA",
+  "upstream": {
+    "repository": "https://github.com/thirdreality/voice-music-assistant/tree/bf9f6838c432685ea8d6b01e9197e9eeedf59426",
+    "revision": "bf9f6838c432685ea8d6b01e9197e9eeedf59426",
+    "root_license": "Apache-2.0",
+    "application_package_declares": "Apache-2.0",
+    "package_license_file_field": "empty",
+    "root_license_copy": "LICENSES/Apache-2.0.txt"
+  },
+  "public_firmware": {
+    "application": {
+      "sha256": "6dde57cd3e79e8a793163abb0773b0f480db0c6f049e37c4ddb54d50e072cdb3",
+      "bytes": 2168976
+    },
+    "attention.wav": {
+      "sha256": "47320cbb9e7013967a4efdf3925fb5c1f28b5ccfeb69bf6a6f7d71b8cf922286",
+      "bytes": 6444
+    },
+    "bootstrap.sh": {
+      "sha256": "8922ebd42199a750290e72aa3e25b0f66366d454c8952c7ed0dde0b827a35a46",
+      "bytes": 3976
+    },
+    "bundle.sha256": {
+      "sha256": "d0a87433f6c38329c6393d5ea7764276699d6f2777ab48fbd37c4c174604aa0d",
+      "bytes": 484
+    },
+    "compatibility.json": {
+      "sha256": "6c6c24e3a6771c01b13b7219059d72f42084a91254e8e68c12c4554b37d8e796",
+      "bytes": 1285
+    },
+    "S98intercom-recover": {
+      "sha256": "3284aae2564eb9c534428b29666eee62bbecb07449f7fd850b74b2e5d96abe74",
+      "bytes": 691
+    },
+    "S99ha-speaker": {
+      "sha256": "1b7bcb853ea01d9f3580087b66c117ff8ac5e0a8aaa9597cbc11dd673a1fd048",
+      "bytes": 8876
+    },
+    "transaction.sh": {
+      "sha256": "12695864f090495cdceda2bbac0be4d9a27d5bad306e3dc82b191d54f0b7f6a1",
+      "bytes": 29884
+    }
+  },
+  "components": [
+    {
+      "name": "Intercom Manager integration/frontend and project modifications",
+      "license": "Apache-2.0",
+      "provenance": "project-authored candidate"
+    },
+    {
+      "name": "application",
+      "origin": "buildroot/package/thirdreality/linux-voice-assistant-cpp",
+      "modified": true,
+      "changes": "profile4 authenticated intercom, local privacy/lifecycle hooks, HA boot-bound time authority",
+      "license_evidence": "upstream root and application .mk declare Apache-2.0; embedded components listed separately"
+    },
+    {
+      "name": "S99ha-speaker",
+      "origin": "buildroot/package/thirdreality/tr-proj-ha-speaker/script/S99ha-speaker",
+      "modified": true,
+      "changes": "paired bootstrap handoff and bounded monitor-adopt entry",
+      "baseline_sha256": "4d010c5749a457d45d59bd20524963e360f7499496303b2e102d0a96097091c1",
+      "license_evidence": "upstream root Apache-2.0; no separate file notice"
+    },
+    {
+      "name": "attention.wav",
+      "origin": "project generator; 200ms 880Hz 16kHz mono PCM; reproduced byte-identically",
+      "license": "Apache-2.0",
+      "vendor_recording": false
+    },
+    {
+      "name": "bootstrap.sh, transaction.sh, S98intercom-recover",
+      "origin": "project-authored permanent-alpha helpers",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "TensorFlow microfrontend compiled into application",
+      "origin": "buildroot/package/thirdreality/linux-voice-assistant-cpp/third_party/microfrontend",
+      "copyright": "2018/2019 The TensorFlow Authors",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "KissFFT compiled into application",
+      "origin": "buildroot/package/thirdreality/linux-voice-assistant-cpp/third_party/microfrontend/include/kissfft",
+      "copyright": "2003-2010 Mark Borgerding (kiss_fft); 2003-2004 Mark Borgerding (kiss_fftr)",
+      "license": "BSD-3-Clause",
+      "notice": "LICENSES/Additional-notices.txt"
+    },
+    {
+      "name": "generated ESPHome protocol C++",
+      "origin": "buildroot/package/thirdreality/linux-voice-assistant-cpp/proto/api.proto and api_options.proto",
+      "license_evidence": "vendor proto files have no license header; ESPHome upstream extension split assigns .proto to MIT",
+      "upstream_license": "https://github.com/esphome/esphome/blob/0b2b16e664ecfc0add37f3435db1c2140b8a687e/LICENSE",
+      "notice": "LICENSES/Additional-notices.txt",
+      "generator": "protobuf 21.12; BSD-3-Clause notice included",
+      "scope_limit": "generated output is not copied ESPHome runtime C/C++ merely because its extension is .cc/.h"
+    },
+    {
+      "name": "nlohmann/json header-only code",
+      "origin": "exact SDK sysroot nlohmann/json.hpp",
+      "version": "3.11.3",
+      "copyright": "2013-2023 Niels Lohmann",
+      "license": "MIT",
+      "notice": "LICENSES/Additional-notices.txt"
+    },
+    {
+      "name": "OpenSSL and other target shared libraries",
+      "redistributed": false,
+      "needed_sonames": [
+        "libssl.so.3",
+        "libcrypto.so.3",
+        "libdl.so.2",
+        "libprotobuf.so.32",
+        "libmpv.so.2",
+        "libpulse-simple.so.0",
+        "libpulse.so.0",
+        "libasound.so.2",
+        "libwebrtc-audio-processing-1.so.3",
+        "libabsl_base.so.2308.0.0",
+        "librt.so.1",
+        "libabsl_raw_logging_internal.so.2308.0.0",
+        "libabsl_log_severity.so.2308.0.0",
+        "libabsl_spinlock_wait.so.2308.0.0",
+        "libcurl.so.4",
+        "libavahi-common.so.3",
+        "libavahi-client.so.3",
+        "libpthread.so.0",
+        "libstdc++.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        "libc.so.6",
+        "ld-linux-aarch64.so.1"
+      ],
+      "license_evidence": "dynamic dependency inventory from reviewed ELF; shared libraries not included or relicensed here"
+    },
+    {
+      "name": "Home Assistant, HACS and AsyncSSH",
+      "redistributed": false,
+      "license_evidence": "runtime dependencies supplied separately; exact Python requirement asyncssh==2.24.1"
+    }
+  ],
+  "excluded": [
+    "private keys/certificates/tokens",
+    "household identities/configuration",
+    "whole SDK/build trees",
+    "kernel",
+    "target shared-library copies",
+    "audio recordings",
+    "private operation/enrollment state"
+  ],
+  "remaining_publication_work": [],
+  "attribution_scope": "bounded supplied-component read; no whole-device image or unrelated SDK redistribution claim",
+  "project_license": "Apache-2.0"
+}

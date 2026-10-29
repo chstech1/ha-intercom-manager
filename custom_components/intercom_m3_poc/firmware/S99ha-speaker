@@ -1,0 +1,271 @@
+#!/bin/sh
+#
+# S99ha-speaker: unified init script and service monitor for HA speaker.
+#
+# Manages:
+#   - netmonitor       (WiFi/internet connectivity state machine)
+#   - voice-assistant  (/usr/bin/linux-voice-assistant-cpp)
+#   - sendspin-client  (music streaming)
+#   - pulseaudio       (reboot device if it dies)
+#
+# Usage:
+#   S99ha-speaker start|stop|restart
+#   S99ha-speaker <service> start|stop|restart
+#
+# Services: netmonitor, voice-assistant, sendspin-client
+
+PIDDIR=/var/run/thirdreality
+MONITOR_PIDFILE=$PIDDIR/ha-speaker.pid
+NETMONITOR_PIDFILE=$PIDDIR/netmonitor.pid
+VOICE_PIDFILE=$PIDDIR/voice-assistant.pid
+DEVICE_CONF="/data/conf/device.json"
+
+SENDSPIN_CLIENT=/usr/bin/sendspin-client
+[ -r /etc/default/sendspin-client ] && . /etc/default/sendspin-client
+
+CHECK_INTERVAL=10
+
+# Disable flag files: when present, the monitor loop skips restarting that service.
+# Created by:  S99ha-speaker <service> stop
+# Removed by:  S99ha-speaker <service> start
+DISABLE_NETMONITOR=/tmp/ha_disable_netmonitor
+DISABLE_VOICE=/tmp/ha_disable_voice
+DISABLE_SENDSPIN=/tmp/ha_disable_sendspin
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+is_running() {
+    local pidfile="$1"
+    [ -f "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# netmonitor
+# ---------------------------------------------------------------------------
+
+start_netmonitor() {
+    is_running "$NETMONITOR_PIDFILE" && return 0
+    rm -f "$NETMONITOR_PIDFILE" "$DISABLE_NETMONITOR"
+    /usr/share/thirdreality/script/netmonitor &
+    echo $! > "$NETMONITOR_PIDFILE"
+}
+
+stop_netmonitor() {
+    touch "$DISABLE_NETMONITOR"
+    if is_running "$NETMONITOR_PIDFILE"; then
+        kill "$(cat "$NETMONITOR_PIDFILE")" 2>/dev/null
+    fi
+    rm -f "$NETMONITOR_PIDFILE"
+}
+
+# ---------------------------------------------------------------------------
+# voice-assistant
+# ---------------------------------------------------------------------------
+
+start_voice_assistant() {
+    is_running "$VOICE_PIDFILE" && return 0
+    if [ ! -e /data/intercom-m56-install/bootstrap.sh ]; then
+    rm -f "$VOICE_PIDFILE" "$DISABLE_VOICE"
+    local spk_name
+    spk_name=$(jq -r '.device.name // "thirdreality-speaker"' "$DEVICE_CONF")
+    /usr/bin/linux-voice-assistant-cpp \
+        --name "$spk_name" \
+        --port 6053 &
+    echo $! > "$VOICE_PIDFILE"
+        return
+    fi
+    /bin/sh /data/intercom-m56-install/bootstrap.sh --check || return 78
+    rm -f "$VOICE_PIDFILE" "$DISABLE_VOICE"
+    /bin/sh /data/intercom-m56-install/bootstrap.sh start &
+    echo $! > "$VOICE_PIDFILE"
+}
+
+stop_voice_assistant() {
+    touch "$DISABLE_VOICE"
+    if is_running "$VOICE_PIDFILE"; then
+        kill "$(cat "$VOICE_PIDFILE")" 2>/dev/null
+        sleep 1
+        kill -9 "$(cat "$VOICE_PIDFILE")" 2>/dev/null
+    fi
+    rm -f "$VOICE_PIDFILE"
+}
+
+# ---------------------------------------------------------------------------
+# sendspin-client (music streaming)
+# ---------------------------------------------------------------------------
+
+start_sendspin() {
+    pidof sendspin-client > /dev/null 2>&1 && return 0
+
+    /etc/init.d/S50avahi-daemon stop 2>/dev/null
+    /etc/init.d/S50avahi-daemon start 2>/dev/null
+    
+    rm -f "$DISABLE_SENDSPIN"
+    local spk_name
+    spk_name=$(jq -r '.device.name // "3RSPK Speaker"' "$DEVICE_CONF")
+    start-stop-daemon --start --quiet --background --name sendspin-client \
+        --exec "$SENDSPIN_CLIENT" -- $SENDSPIN_CLIENT_OPTS "$spk_name"
+}
+
+stop_sendspin() {
+    touch "$DISABLE_SENDSPIN"
+    start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 --name sendspin-client
+    start-stop-daemon --stop --quiet --oknodo --retry=0/30/KILL/5 --name sendspin-client
+}
+
+# ---------------------------------------------------------------------------
+# Monitor loop
+# ---------------------------------------------------------------------------
+
+monitor_loop() {
+    while true; do
+        # 1. netmonitor
+        if [ ! -f "$DISABLE_NETMONITOR" ] && ! is_running "$NETMONITOR_PIDFILE"; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] netmonitor not running, restarting..."
+            start_netmonitor
+        fi
+
+        # 2. voice-assistant
+        if [ ! -f "$DISABLE_VOICE" ] && ! is_running "$VOICE_PIDFILE"; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] voice-assistant not running, restarting..."
+            start_voice_assistant
+        fi
+
+        # 3. sendspin-client
+        if [ ! -f "$DISABLE_SENDSPIN" ] && ! pidof sendspin-client > /dev/null 2>&1; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] sendspin-client not running, restarting..."
+            start_sendspin
+        fi
+
+        # 4. pulseaudio
+        if ! pidof pulseaudio > /dev/null 2>&1; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] pulseaudio died, rebooting..."
+            sync
+            sleep 3
+            reboot -f
+        fi
+
+        sleep $CHECK_INTERVAL
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Daemon lifecycle
+# ---------------------------------------------------------------------------
+
+start() {
+    mkdir -p "$PIDDIR"
+
+    if is_running "$MONITOR_PIDFILE"; then
+        echo "ha-speaker already running (PID: $(cat "$MONITOR_PIDFILE"))"
+        exit 0
+    fi
+
+    /usr/share/thirdreality/script/setup_env.sh
+
+    NETWORK_STATUS=$(jq -r '.network.status // "disconnected"' "$DEVICE_CONF" 2>/dev/null)
+    if [ "$NETWORK_STATUS" = "disconnected" ]; then
+        /etc/init.d/S44bluetooth up
+        paplay /usr/share/thirdreality/audio/setup_mode.wav &
+    fi
+
+    # voice-assistant and sendspin-client require network (NTP sync).
+    # Disable them at boot; ntpdate.sh enables them after first sync.
+    touch "$DISABLE_VOICE" "$DISABLE_SENDSPIN"
+
+    start_netmonitor
+
+    monitor_loop &
+    echo $! > "$MONITOR_PIDFILE"
+    echo "ha-speaker started (PID: $(cat "$MONITOR_PIDFILE"))"
+}
+
+stop() {
+    if is_running "$MONITOR_PIDFILE"; then
+        kill "$(cat "$MONITOR_PIDFILE")" 2>/dev/null
+        echo "ha-speaker stopped (PID: $(cat "$MONITOR_PIDFILE"))"
+    else
+        echo "ha-speaker not running"
+    fi
+    rm -f "$MONITOR_PIDFILE"
+
+    /etc/init.d/S44bluetooth stop
+    stop_voice_assistant
+    stop_sendspin
+    stop_netmonitor
+    # Clear disable flags so next start brings everything up
+    rm -f "$DISABLE_NETMONITOR" "$DISABLE_VOICE" "$DISABLE_SENDSPIN"
+}
+
+restart() {
+    stop
+    sleep 1
+    start
+}
+
+# ---------------------------------------------------------------------------
+# Per-service subcommands:  S99ha-speaker <service> start|stop|restart
+# ---------------------------------------------------------------------------
+
+service_cmd() {
+    local svc="$1"
+    local action="$2"
+    case "$svc" in
+        netmonitor)
+            case "$action" in
+                start)   start_netmonitor ;;
+                stop)    stop_netmonitor ;;
+                restart) stop_netmonitor; sleep 1; start_netmonitor ;;
+                *) echo "Usage: $0 netmonitor {start|stop|restart}"; exit 1 ;;
+            esac
+            ;;
+        voice-assistant)
+            case "$action" in
+                start)   start_voice_assistant ;;
+                stop)    stop_voice_assistant ;;
+                restart) stop_voice_assistant; sleep 1; start_voice_assistant ;;
+                *) echo "Usage: $0 voice-assistant {start|stop|restart}"; exit 1 ;;
+            esac
+            ;;
+        sendspin-client)
+            case "$action" in
+                start)   start_sendspin ;;
+                stop)    stop_sendspin ;;
+                restart) stop_sendspin; sleep 1; start_sendspin ;;
+                *) echo "Usage: $0 sendspin-client {start|stop|restart}"; exit 1 ;;
+            esac
+            ;;
+        *)
+            echo "Unknown service: $svc"
+            echo "Services: netmonitor, voice-assistant, sendspin-client"
+            exit 1
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+case "$1" in
+    monitor-adopt)
+        # Caller must first stop and verify the exact prior monitor identity.
+        # This command does not invoke setup_env, network, music or Bluetooth.
+        if is_running "$MONITOR_PIDFILE"; then exit 1; fi
+        monitor_loop &
+        echo $! > "$MONITOR_PIDFILE"
+        ;;
+    start)   start   ;;
+    stop)    stop    ;;
+    restart) restart ;;
+    netmonitor|voice-assistant|sendspin-client)
+        service_cmd "$1" "$2"
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        echo "       $0 {netmonitor|voice-assistant|sendspin-client} {start|stop|restart}"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs before S99. Missing or failed recovery prevents managed voice startup.
+case "${1:-}" in
+    start)
+        if [ -f /data/intercom-m56-install/pending ]; then
+            /bin/sh /data/intercom-m56-install/engine.sh boot-reconcile || {
+                touch /tmp/ha_disable_voice
+                printf '%s\n' 'INTERCOM_UNKNOWN_BOOT_STATE: startup held; explicit recovery required' >&2
+                # Stop this hook rather than running later init entries after an
+                # unknown pair. Serial rcS applicability must be proved on target.
+                kill -STOP $$
+                exit 78
+            }
+        fi
+        ;;
+    stop) :;;
+    *) exit 1;;
+esac
