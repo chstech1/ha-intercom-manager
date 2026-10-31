@@ -2,5 +2,5 @@
 
 # Public payload only. Enrollment and physical-checkpoint authority are held
 # separately in Home Assistant's private deployment directory.
-COMPATIBILITY_SHA256 = "6c6c24e3a6771c01b13b7219059d72f42084a91254e8e68c12c4554b37d8e796"
-BUNDLE_MANIFEST_SHA256 = "d0a87433f6c38329c6393d5ea7764276699d6f2777ab48fbd37c4c174604aa0d"
+COMPATIBILITY_SHA256 = "8be8cae6eb98ef539a955c8ae924d1ac745c962cf7d7f1f245d1f4b222dc7c5d"
+BUNDLE_MANIFEST_SHA256 = "e18c524037145fcdcf4e88054f27f06282d46c61e68eb904c101d690369e551e"

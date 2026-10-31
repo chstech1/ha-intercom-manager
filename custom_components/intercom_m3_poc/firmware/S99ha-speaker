@@ -1,4 +1,5 @@
 #!/bin/sh
+# Modified by Intercom Manager: paired startup, recovery and monitor adoption.
 #
 # S99ha-speaker: unified init script and service monitor for HA speaker.
 #

@@ -199,6 +199,7 @@ class Runtime:
     last_media_report: float = 0.0
     last_metrics: dict = field(default_factory=dict)
     call_started_at: float = 0.0
+    upgrade_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
     def control_cleanup_key(self):
@@ -464,6 +465,13 @@ class Runtime:
         except Refused:
             await self.revoke("AUTHORITY_REVOKED")
             return False
+        if self.manager is not None:
+            try:
+                if (not self.manager.permitted(owner.principal.user_id, self.device_id)
+                        or self.manager.dnd(self.device_id)):
+                    return False
+            except Refused:
+                return False
         return self.accepting and self.session.owner is owner
 
     @callback
@@ -574,6 +582,7 @@ class Runtime:
             self.manager.reserve([self.device_id], browser=True)
         owner = self.session.start(principal, browser_id)
         owner.mode = mode
+        owner.initial_mode = mode
         owner.caller_tx_enabled = True
         owner.mode_generation = 0
         owner.attachment_deadline = self.session.clock() + 3
@@ -913,13 +922,32 @@ async def ws_set_caller_tx_enabled(hass, connection, msg) -> None:
 async def ws_request_duplex(hass, connection, msg) -> None:
     try:
         runtime = _message_runtime(hass, msg)
-        owner = _owner_message(runtime, connection, msg)
-        if msg["expected_mode_generation"] != owner.mode_generation:
-            raise Refused("STALE_MODE")
-    except Refused as err:
+        async with runtime.upgrade_lock:
+            owner = _owner_message(runtime, connection, msg)
+            if msg["expected_mode_generation"] != owner.mode_generation:
+                raise Refused("STALE_MODE")
+            if (runtime.state != "ACTIVE_SPEAKER_ONLY" or runtime.media_ws is None
+                    or runtime.media_ws.closed or not owner.attached
+                    or getattr(owner, "initial_mode", None) != "full_duplex"):
+                raise Refused("UPGRADE_NOT_READY")
+            if runtime.manager is not None:
+                runtime.manager.require(owner.principal.user_id, [runtime.device_id])
+            if not await runtime.authorize_owner(owner):
+                raise Refused("NOT_AUTHORIZED")
+            callback = getattr(owner, "request_duplex", None)
+            if callback is None or runtime.session.owner is not owner:
+                raise Refused("UPGRADE_NOT_READY")
+            await callback(msg["expected_mode_generation"])
+    except (Refused, EndpointEnded) as err:
         _send_error(connection, msg, str(err))
         return
-    _send_error(connection, msg, "UNSUPPORTED_MODE")
+    except Exception as err:
+        from .media import MediaEnded
+        if not isinstance(err, MediaEnded):
+            raise
+        _send_error(connection, msg, str(err))
+        return
+    connection.send_result(msg["id"], {"pending": True})
 
 
 @websocket_api.websocket_command(

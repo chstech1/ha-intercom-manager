@@ -1,6 +1,6 @@
 # Provenance and licensing
 
-This development alpha contains the project's Home Assistant integration, JavaScript/HTML frontend and eight-file public firmware kit, exported from its 0.4.3 source. It preserves the internal `intercom_m3_poc` domain for compatibility. Repository: https://github.com/chstech1/ha-intercom-manager.
+This development alpha contains the project's Home Assistant integration, JavaScript/HTML frontend and eight-file public firmware kit, prepared from reviewed 0.4.4 candidate inputs. It preserves the internal `intercom_m3_poc` domain for compatibility. Repository: https://github.com/chstech1/ha-intercom-manager.
 
 Project-authored integration, frontend, helpers, attention tone, icon and project modifications are licensed under Apache-2.0; see [LICENSE](LICENSE). Upstream and embedded third-party components retain the licenses and notices described below.
 
@@ -17,3 +17,5 @@ Home Assistant and its installed libraries supply the integration runtime depend
 The icon is an original geometric drawing generated for this distribution, rather than a Home Assistant or speaker-vendor logo. It uses the project Apache-2.0 license.
 
 The firmware application is a prebuilt AArch64 ELF identified by SHA-256 in [THIRD_PARTY.json](THIRD_PARTY.json) and the firmware catalog. Its vendor base is the pinned ThirdReality revision linked there, with the modifications described above. This HACS repository does not include the modified C++ source/build toolchain and does not claim a standalone reproducible firmware build. Replacing the firmware kit requires a separately reviewed build and matching catalog pins.
+
+The 0.4.4 application SHA-256 is 46009f0cb4f697087d4bab66e0c7039e68f69a784c5717a105c21e92a77f35cd. Its accompanying source archive is [application-46009f0c-source.zip](https://github.com/chstech1/ha-intercom-manager/releases/download/v0.4.4/application-46009f0c-source.zip), SHA-256 `37836c4bef997cceed4355e3af36bd212001c6e1b086e79521ad824b97c21c56`; it includes the exact project overlay, upstream modification patch and modified startup script. The unmodified vendor inputs match the pinned ThirdReality revision referenced above.

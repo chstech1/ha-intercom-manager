@@ -308,7 +308,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
     loop = asyncio.get_running_loop()
     browser_clock = ClockRelation()
     browser_control: asyncio.Queue[bytes] = asyncio.Queue(maxsize=16)
-    browser_audio: deque[tuple[int, int, bytes]] = deque(maxlen=3)
+    browser_audio: deque[tuple[int, int, bytes, int]] = deque(maxlen=3)
     browser_audio_ready = asyncio.Event()
     stop = asyncio.Event()
     metrics = {"uplink_frames": 0, "downlink_frames": 0, "stale_drops": 0,
@@ -338,9 +338,27 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
             raise MediaEnded("CONTROL_BLOCKED") from None
 
     async def bridge(endpoint: EndpointClient) -> None:
+        def mode_changed() -> None:
+            browser_audio.clear()
+            shared["endpoint_capture"] = shared["browser_downlink"] = 0.0
+
+        endpoint.mode_changed = mode_changed
+
+        async def request_duplex(generation: int) -> None:
+            if (not valid() or not shared["active"] or endpoint.mode != "speaker_only"
+                    or getattr(owner, "initial_mode", mode) != "full_duplex"
+                    or not await authorize() or not valid() or not shared["active"]):
+                raise MediaEnded("UPGRADE_NOT_READY")
+            await endpoint.request_duplex(generation)
+            metrics["room_mic_muted"] = endpoint.room_mic_muted
+            await emit("ACTIVE_SPEAKER_ONLY", "UPGRADE_PENDING")
+
+        owner.request_duplex = request_duplex
+
         async def browser_writer() -> None:
             sequence = 0
             while valid() and not stop.is_set():
+                audio_generation = None
                 try:
                     frame = browser_control.get_nowait()
                 except asyncio.QueueEmpty:
@@ -350,7 +368,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                             await asyncio.wait_for(browser_audio_ready.wait(), .02)
                         except TimeoutError:
                             continue
-                    generated, prior, pcm = browser_audio.popleft()
+                    generated, prior, pcm, audio_generation = browser_audio.popleft()
                     hold_us = max(0, int(loop.time() * 1_000_000) - generated)
                     metrics["browser_downlink_queue_hold_max_ms"] = max(
                         metrics["browser_downlink_queue_hold_max_ms"], hold_us // 1_000)
@@ -361,7 +379,8 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 await asyncio.wait_for(ws.send_bytes(frame), .25)
                 if len(frame) > 100:
                     metrics["downlink_frames"] += 1
-                    shared["browser_downlink"] = loop.time()
+                    if audio_generation == endpoint.mode_generation and endpoint.mode == "full_duplex":
+                        shared["browser_downlink"] = loop.time()
 
         async def browser_reader() -> None:
             expected = 0
@@ -423,7 +442,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 if len(browser_audio) == browser_audio.maxlen:
                     browser_audio.popleft()
                     metrics["queue_drops"] += 1
-                browser_audio.append((generated, prior, pcm))
+                browser_audio.append((generated, prior, pcm, endpoint.mode_generation))
                 browser_audio_ready.set()
                 metrics["endpoint_capture_frames"] += 1
                 shared["endpoint_capture"] = loop.time()
@@ -445,6 +464,10 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
             tx_enabled = bool(getattr(owner, "caller_tx_enabled", True))
             uplink_floor = 0.0
             uplink_wait_started = 0.0
+            unmute_edges = endpoint.unmute_edges
+            previous_muted = None
+            unmute_pending = None
+            last_mode = None
             await emit("CONNECTING", "REAL_ENDPOINT")
             while valid():
                 await asyncio.sleep(.05)
@@ -464,9 +487,38 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                     endpoint.clock.rejected_uncertainty_max_ms)
                 metrics["endpoint_audio_stale_drops"] = endpoint.audio_stale_drops
                 metrics["endpoint_tx_queue_hold_max_ms"] = endpoint.tx_queue_hold_max_ms
-                if endpoint.room_mic_muted:
-                    owner.mode = "speaker_only"
-                    owner.mode_generation = endpoint.mode_generation
+                owner.mode = endpoint.mode
+                owner.mode_generation = endpoint.mode_generation
+                if endpoint.upgrade_generation is not None and now - endpoint.upgrade_started > 11:
+                    raise MediaEnded("UPGRADE_TIMEOUT")
+                if endpoint.unmute_edges != unmute_edges:
+                    unmute_edges = endpoint.unmute_edges
+                    if (getattr(owner, "initial_mode", mode) == "full_duplex"
+                            and endpoint.upgrade_generation is None):
+                        unmute_pending = (endpoint.mode_generation, now + 2)
+                if unmute_pending is not None:
+                    generation, deadline = unmute_pending
+                    if (endpoint.room_mic_muted or endpoint.mode != "speaker_only"
+                            or generation != endpoint.mode_generation
+                            or endpoint.upgrade_generation is not None):
+                        unmute_pending = None
+                    elif now >= deadline:
+                        unmute_pending = None
+                        endpoint.upgrade_result = "UPGRADE_FAILED"
+                    elif shared["active"] and endpoint.ready(now) and endpoint.status == 4:
+                        unmute_pending = None
+                        try:
+                            await request_duplex(generation)
+                        except (EndpointEnded, MediaEnded):
+                            endpoint.upgrade_result = "UPGRADE_FAILED"
+                if endpoint.upgrade_result == "UPGRADE_FAILED":
+                    endpoint.upgrade_result = None
+                    await emit("ACTIVE_SPEAKER_ONLY" if shared["active"] else "CONNECTING",
+                               "UPGRADE_FAILED")
+                if previous_muted != endpoint.room_mic_muted:
+                    previous_muted = endpoint.room_mic_muted
+                    if shared["active"] and endpoint.mode == "speaker_only":
+                        await emit("ACTIVE_SPEAKER_ONLY", "MUTE_CHANGED")
                 required = [shared["ready"], shared["endpoint_sink"]]
                 if endpoint.mode == "full_duplex":
                     required.extend((shared["browser_downlink"], shared["endpoint_capture"]))
@@ -489,12 +541,13 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 active = (endpoint.ready(now) and browser_clock.fresh(now)
                           and all(stamp > 0 and now - stamp <= no_progress for stamp in required))
                 ever_active = ever_active or active
-                if active != shared["active"] or active and now - last_emit >= 1:
+                if active != shared["active"] or active and (endpoint.mode != last_mode or now - last_emit >= 1):
                     shared["active"] = active
                     await emit("ACTIVE_FULL" if active and endpoint.mode == "full_duplex" else
                                "ACTIVE_SPEAKER_ONLY" if active else "CONNECTING",
                                "REAL_ENDPOINT" if active else "MEDIA_NO_PROGRESS")
                     last_emit = now
+                    last_mode = endpoint.mode
                 if not ever_active and now - started > REAL_SETUP_TIMEOUT_S:
                     raise MediaEnded("SETUP_TIMEOUT")
                 if (current_tx_enabled and uplink_wait_started
@@ -530,6 +583,8 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 if task.exception():
                     raise task.exception()
         finally:
+            owner.request_duplex = None
+            endpoint.mode_changed = None
             stop.set()
             for task in tasks:
                 task.cancel()

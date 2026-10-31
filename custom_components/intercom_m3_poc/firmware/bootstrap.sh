@@ -8,7 +8,7 @@ STATE=/data/intercom-m56-install
 PRIVATE=$STATE/private
 APP=/usr/bin/linux-voice-assistant-cpp
 TICKET=/tmp/intercom-m56-boot.clock.json
-APP_SHA=6dde57cd3e79e8a793163abb0773b0f480db0c6f049e37c4ddb54d50e072cdb3
+APP_SHA=46009f0cb4f697087d4bab66e0c7039e68f69a784c5717a105c21e92a77f35cd
 fail() { printf 'intercom_boot_unavailable: %s\n' "$1" >&2; exit 78; }
 sha() { sha256sum "$1" | cut -c1-64; }
 root_private() {

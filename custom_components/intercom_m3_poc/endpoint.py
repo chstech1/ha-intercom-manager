@@ -177,6 +177,11 @@ class EndpointClient:
         self.started = False
         self.ring_seen = False
         self.room_mic_muted = False
+        self.unmute_edges = 0
+        self.upgrade_generation: int | None = None
+        self.upgrade_started = 0.0
+        self.upgrade_result: str | None = None
+        self.mode_changed: Callable[[], None] | None = None
         self.last_tx = self.last_audio_tx = self.last_rx = self.last_sink = 0.0
         self.audio_prior_age_max_ms = self.audio_transit_age_max_ms = 0
         self.clock_uncertainty_ms = self.audio_stale_drops = 0
@@ -342,6 +347,25 @@ class EndpointClient:
             raise EndpointEnded("ANSWER_STATE_INVALID")
         await self.send_control(16, CALL_CONTROL.pack(self.mode_generation, 2, 0))
 
+    async def request_duplex(self, generation: int) -> None:
+        now = asyncio.get_running_loop().time()
+        if self.upgrade_generation is not None:
+            raise EndpointEnded("UPGRADE_BUSY")
+        if (not self.capabilities & 4 or self.closed or self.ending or self.held or not self.ready(now)
+                or self.mode != "speaker_only" or self.status != 4
+                or self.room_mic_muted or self.status_health & 0xe0
+                or generation != self.mode_generation or generation >= 0xffffffff
+                or now - self.last_status_received > 1.5):
+            raise EndpointEnded("UPGRADE_NOT_READY")
+        self.upgrade_generation = generation
+        self.upgrade_started = now
+        self.upgrade_result = None
+        try:
+            await self.send_control(14, struct.pack("<I", generation))
+        except BaseException:
+            self.upgrade_generation = None
+            raise
+
     async def hangup(self, reason: int = 13) -> None:
         if not self.closed and self.started:
             await self.send_control(3, struct.pack("<H", reason))
@@ -352,7 +376,6 @@ class EndpointClient:
             try:
                 kind, tail, call, owner = self.control.get_nowait()
                 from_control = True
-                body = self._envelope(call, owner) + tail
             except asyncio.QueueEmpty:
                 if not self.audio:
                     self.audio_ready.clear()
@@ -374,6 +397,23 @@ class EndpointClient:
                 tail = AUDIO.pack(self.mode_generation, self.tx_media_sequence, now_us, inherited, SAMPLES) + pcm
                 self.tx_media_sequence += 1
                 kind, body = 1, self._envelope() + tail
+            if kind == 14:
+                if self.renewal_authorize is None or not await self.renewal_authorize():
+                    raise EndpointEnded("AUTH_REVOKED")
+                now = asyncio.get_running_loop().time()
+                if (self.upgrade_generation is None or self.ending or self.closed or self.held
+                        or self.mode != "speaker_only" or self.status != 4
+                        or self.room_mic_muted or self.status_health & 0xe0
+                        or not self.ready(now) or now - self.last_status_received > 1.5
+                        or self.upgrade_generation != self.mode_generation
+                        or tail != struct.pack("<I", self.mode_generation)):
+                    if self.upgrade_generation is not None and tail == struct.pack("<I", self.upgrade_generation):
+                        self.upgrade_generation = None
+                        self.upgrade_result = "UPGRADE_FAILED"
+                    self.control.task_done()
+                    continue
+            if from_control:
+                body = self._envelope(call, owner) + tail
             await self._write_raw(kind, body)
             if from_control:
                 self.control.task_done()
@@ -497,10 +537,28 @@ class EndpointClient:
                     self.room_mic_muted = True
                     while not self.capture.empty():
                         self.capture.get_nowait()
+                    self.audio.clear()
+                    if self.mode_changed:
+                        self.mode_changed()
+                elif (self.upgrade_generation is not None and state == 4 and mode == 2
+                      and health & 32 and mode_generation == self.mode_generation + 1):
+                    self.mode_generation = mode_generation
+                    self.upgrade_generation = None
+                    self.upgrade_result = "UPGRADE_FAILED"
+                    self.audio.clear()
+                    if self.mode_changed:
+                        self.mode_changed()
+                    while not self.capture.empty():
+                        self.capture.get_nowait()
                 elif mode_generation != self.mode_generation:
                     raise EndpointEnded("STATUS_GENERATION_INVALID")
                 expected = 3 if self.mode == "full_duplex" else 4
-                if state == expected and mode == (1 if self.mode == "full_duplex" else 2):
+                if ((state == expected or (state == 5 and self.upgrade_generation == mode_generation))
+                        and mode == (1 if self.mode == "full_duplex" else 2)):
+                    muted = bool(health & 32)
+                    if self.mode == "speaker_only" and self.room_mic_muted and not muted:
+                        self.unmute_edges += 1
+                    self.room_mic_muted = muted
                     self.status = state
                     self.status_health = health
                     self.status_rx_sequence, self.status_tx_sequence = rx_sequence, tx_sequence
@@ -523,7 +581,32 @@ class EndpointClient:
             elif kind in (6, 9, 13):
                 raise EndpointEnded(self._terminal_reason(kind, tail))
             elif kind == 15:
-                pass
+                if len(tail) != 7 or self.upgrade_generation is None:
+                    raise EndpointEnded("UPGRADE_RESULT_INVALID")
+                generation, result, health = struct.unpack("<IBH", tail)
+                expected_generation = self.upgrade_generation
+                if (result > 4 or health & ~0xff or generation != expected_generation + (result == 0)
+                        or self.mode_generation != expected_generation or self.mode != "speaker_only"):
+                    raise EndpointEnded("UPGRADE_RESULT_INVALID")
+                if result == 0:
+                    if health & 31 != 31 or health & 0xe0 or self.room_mic_muted:
+                        raise EndpointEnded("UPGRADE_RESULT_INVALID")
+                    if self.renewal_authorize is None or not await self.renewal_authorize():
+                        raise EndpointEnded("AUTH_REVOKED")
+                    if self.upgrade_generation != expected_generation or self.ending or self.closed:
+                        raise EndpointEnded("UPGRADE_RESULT_INVALID")
+                    self.audio.clear()
+                    if self.mode_changed:
+                        self.mode_changed()
+                    while not self.capture.empty():
+                        self.capture.get_nowait()
+                    self.mode, self.mode_generation = "full_duplex", generation
+                    self.status, self.last_sink = 0, 0.0
+                    self.status_health = health
+                    self.upgrade_result = "UPGRADE_ACCEPTED"
+                else:
+                    self.upgrade_result = "UPGRADE_FAILED"
+                self.upgrade_generation = None
             elif kind in (4, 5):
                 await self._clock_frame(kind, tail, idle=False)
             else:
@@ -794,7 +877,7 @@ class EndpointClient:
             await asyncio.sleep(1)
 
     def ready(self, now: float) -> bool:
-        return (self.answered and not self.held and self.status in (3, 4) and self.clock.fresh(now)
+        return (self.answered and not self.held and self.status in (3, 4, 5) and self.clock.fresh(now)
                 and self.last_sink > 0 and now - self.last_sink <= .5)
 
     def bind(self, call_id: bytes, owner_generation: int, mode: str,
