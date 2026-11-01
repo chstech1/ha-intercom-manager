@@ -236,6 +236,17 @@ class Manager:
         self.volume_state = {}
         self.volume_tasks = {}
         self.history_write_failures = 0
+        # Separate diagnostic store: recent metadata survives history deletion and restart.
+        self.diagnostic_store = Store(hass, 1, f"intercom_m3_poc.call_diagnostics.{entry.entry_id}")
+        self.diagnostic_lock = hass.data.setdefault(f"intercom_m3_poc.diagnostic_lock.{entry.entry_id}", asyncio.Lock())
+        self.diagnostic_records = []
+        self.diagnostic_owners = {}  # Volatile authority; never write principals or tokens.
+        self.diagnostic_rates = {}
+        self.diagnostic_write_failures = 0
+        self.diagnostic_load_failed = False
+        self.diagnostic_loading = True
+        self.diagnostic_dirty = False
+        self.diagnostic_task = None
         self.history_starts = {}
         self.listener_failures = 0
         self.runtime_cleanup_failures = 0
@@ -243,6 +254,11 @@ class Manager:
 
     async def load(self, device_id):
         from .endpoint import EndpointConfig
+        try:
+            self.hass.async_create_background_task(self.diagnostic_load(), "intercom diagnostics load")
+        except Exception:
+            self.diagnostic_load_failed = True
+            self.diagnostic_loading = False
         saved = await self.store.async_load()
         profiles, profile_values = {}, {}
         if saved is None:
@@ -764,6 +780,101 @@ class Manager:
         self.tasks.add(task)
         task.add_done_callback(self.tasks.discard)
         return task
+
+    async def diagnostic_load(self):
+        try:
+            async with self.diagnostic_lock:
+                diagnostics = await self.diagnostic_store.async_load()
+            if diagnostics is not None:
+                if (not isinstance(diagnostics, dict) or diagnostics.get("schema") != 1
+                        or not isinstance(diagnostics.get("calls"), list)
+                        or len(diagnostics["calls"]) > 100):
+                    raise ValueError("invalid diagnostic storage")
+                from . import _browser_watchdog_snapshot, SAFE_ID, SAFE_GENERATION, SAFE_REASON, ALLOWED_STATES
+                for row in diagnostics["calls"]:
+                    if (type(row) is not dict or set(row) != {"call_id", "room_id", "owner_generation", "events"}
+                            or not isinstance(row["call_id"], str) or not SAFE_ID.fullmatch(row["call_id"])
+                            or not isinstance(row["owner_generation"], str) or not SAFE_GENERATION.fullmatch(row["owner_generation"])
+                            or not isinstance(row["room_id"], str) or len(row["room_id"]) > 64
+                            or type(row["events"]) is not list or len(row["events"]) > 40):
+                        raise ValueError("invalid diagnostic record")
+                    for event in row["events"]:
+                        if type(event) is not dict or not isinstance(event.get("server_utc"), str):
+                            raise ValueError("invalid diagnostic event")
+                        datetime.fromisoformat(event["server_utc"])
+                        if event.get("source") == "client_reported":
+                            from . import CLIENT_REASONS
+                            if "snapshot" in event:
+                                valid = set(event) == {"server_utc", "source", "snapshot"} and _browser_watchdog_snapshot(event["snapshot"]) is not None
+                            else:
+                                valid = (set(event) in ({"server_utc", "source", "terminal", "reason"}, {"server_utc", "source", "terminal", "reason", "watchdog"}, {"server_utc", "source", "terminal", "reason", "last_snapshot"})
+                                         and event["terminal"] is True and event["reason"] in CLIENT_REASONS
+                                         and all(_browser_watchdog_snapshot(event[k]) is not None for k in ("watchdog", "last_snapshot") if k in event))
+                            if not valid:
+                                raise ValueError("invalid client diagnostic")
+                        elif event.get("source") == "server":
+                            if (set(event) not in ({"server_utc", "source", "state", "reason"},
+                                    {"server_utc", "source", "state", "reason", "mode", "progress"})
+                                    or event["state"] not in ALLOWED_STATES
+                                    or not isinstance(event["reason"], str) or not SAFE_REASON.fullmatch(event["reason"])):
+                                raise ValueError("invalid server diagnostic")
+                            if "progress" in event and (event["mode"] not in ("full_duplex", "speaker_only")
+                                    or type(event["progress"]) is not dict
+                                    or not set(event["progress"]) <= {"uplink_frames", "downlink_frames", "endpoint_sink_frames", "endpoint_capture_frames", "room_mic_muted"}
+                                    or any(type(v) not in (int, bool) or not 0 <= v <= 2**53-1 for v in event["progress"].values())):
+                                raise ValueError("invalid server progress")
+                        else:
+                            raise ValueError("invalid diagnostic source")
+                current = self.diagnostic_records
+                active_ids = {row["call_id"] for row in current}
+                self.diagnostic_records = ([row for row in diagnostics["calls"] if row["call_id"] not in active_ids] + current)[-100:]
+        except Exception:
+            # Do not overwrite corrupt evidence or make the call service unavailable.
+            self.diagnostic_load_failed = True
+        finally:
+            self.diagnostic_loading = False
+            if self.diagnostic_dirty and not self.diagnostic_load_failed:
+                self.diagnostic_schedule_save()
+
+    def diagnostic_start(self, owner, room_id):
+        from . import _b64, _encode_generation
+        call_id = _b64(owner.call_id)
+        self.diagnostic_records.append({"call_id": call_id, "room_id": room_id,
+            "owner_generation": _encode_generation(owner.generation), "events": []})
+        self.diagnostic_records = self.diagnostic_records[-100:]
+        self.diagnostic_owners = {key: value for key, value in self.diagnostic_owners.items()
+                                  if any(row.get("call_id") == key for row in self.diagnostic_records)}
+        self.diagnostic_rates = {key: value for key, value in self.diagnostic_rates.items() if key in self.diagnostic_owners}
+        self.diagnostic_owners[call_id] = (owner.principal, owner.generation, room_id)
+        self.diagnostic_event(call_id, "server", {"state": "PREPARING", "reason": "STARTED"})
+
+    def diagnostic_event(self, call_id, source, data):
+        record = next ( (r for r in self.diagnostic_records if r.get("call_id") == call_id), None)
+        if record is None:
+            return
+        if data.get("terminal") and any(e.get("terminal") is True and e.get("source") == "client_reported" for e in record["events"]):
+            return
+        event = {"server_utc": datetime.now(timezone.utc).isoformat(), "source": source, **deepcopy(data)}
+        record["events"] = (record["events"] + [event])[-40:]
+        self.diagnostic_dirty = True
+        self.diagnostic_schedule_save()
+
+    def diagnostic_schedule_save(self):
+        if self.diagnostic_loading or self.diagnostic_load_failed or self.diagnostic_task is not None:
+            return
+        async def save():
+            try:
+                async with self.diagnostic_lock:
+                    while self.diagnostic_dirty:
+                        self.diagnostic_dirty = False
+                        await self.diagnostic_store.async_save({"schema": 1, "calls": deepcopy(self.diagnostic_records)})
+            except Exception:
+                self.diagnostic_write_failures += 1
+                self.diagnostic_dirty = True
+            finally:
+                self.diagnostic_task = None
+        # One in-flight writer; diagnostic I/O is never awaited by call cleanup.
+        self.diagnostic_task = self.hass.async_create_background_task(save(), "intercom diagnostics save")
 
     def schedule_record(self, item):
         async def save():

@@ -512,6 +512,10 @@ class Runtime:
                     "room_ids": [self.device_id], "started_at": self.call_started_at,
                     "ended_at": ended, "duration_seconds": max(0, ended - self.call_started_at),
                     "outcome": "ended", "reason": reason}
+            try:
+                self.manager.diagnostic_event(_b64(owner.call_id), "server", {"state": "TERMINATED", "reason": reason})
+            except Exception:
+                self.manager.diagnostic_write_failures += 1
             self.manager.schedule_record(item)
         self.session.revoke()
         self.state = "TERMINATED"
@@ -595,6 +599,10 @@ class Runtime:
         import time
         self.call_started_at = time.time()
         if self.manager is not None:
+            try:
+                self.manager.diagnostic_start(owner, self.device_id)
+            except Exception:
+                self.manager.diagnostic_write_failures += 1
             self.manager.begin_history({"call_id": _b64(owner.call_id), "type": "browser",
                 "room_ids": [self.device_id], "started_at": self.call_started_at})
         self.last_media_report = 0.0
@@ -657,6 +665,18 @@ class Runtime:
             self.reason = reason
             if "room_mic_muted" in safe_metrics:
                 self.room_mic_muted = bool(safe_metrics["room_mic_muted"])
+            if self.manager is not None:
+                # Persist transitions and a low-rate progress sample, never individual frames.
+                import time
+                stamp = time.monotonic()
+                signature = (state, reason, getattr(owner, "mode", "full_duplex"), self.room_mic_muted)
+                if signature != getattr(owner, "diagnostic_signature", None) or stamp - getattr(owner, "diagnostic_at", 0) >= 5:
+                    owner.diagnostic_signature, owner.diagnostic_at = signature, stamp
+                    progress = {k: safe_metrics[k] for k in ("uplink_frames", "downlink_frames", "endpoint_sink_frames", "endpoint_capture_frames", "room_mic_muted") if k in safe_metrics and type(safe_metrics[k]) in (int, bool) and 0 <= safe_metrics[k] <= 2**53-1}
+                    try:
+                        self.manager.diagnostic_event(_b64(owner.call_id), "server", {"state": state, "reason": reason, "mode": signature[2], "progress": progress})
+                    except Exception:
+                        self.manager.diagnostic_write_failures += 1
             self._emit(owner, state, reason, safe_metrics)
             self._notify_status()
 
@@ -837,7 +857,7 @@ def _browser_watchdog_snapshot(value):
     fields = {"frontendBuild", "captureStalled", "outputStalled", "contextRunning",
               "captureAgeMs", "outputAgeMs", "contextState", "backendState",
               "callMode", "lastActiveMode", "roomMuted", "expectRoomPlayback"}
-    if type(value) is not dict or set(value) != fields or value["frontendBuild"] != "0.4.8":
+    if type(value) is not dict or set(value) != fields or value["frontendBuild"] not in ("0.4.8", "0.4.9"):
         return None
     if any(type(value[k]) is not bool for k in ("captureStalled", "outputStalled",
                                                   "contextRunning", "expectRoomPlayback")):
@@ -862,7 +882,7 @@ OWNER_SCHEMA = {
 
 @websocket_api.websocket_command(
     {probatio.Required("type"): "intercom_native/stop", **OWNER_SCHEMA,
-     probatio.Optional("watchdog"): dict}
+     probatio.Optional("watchdog"): dict, probatio.Optional("client_reason"): str}
 )
 @websocket_api.async_response
 async def ws_stop(hass, connection, msg) -> None:
@@ -874,9 +894,23 @@ async def ws_stop(hass, connection, msg) -> None:
         if runtime.session.owner is None:
             if runtime.terminal_owner != (principal, call_id, generation):
                 raise Refused("NOT_OWNER")
-            teardown_complete = await runtime.wait_for_media_teardown()
         else:
             runtime.session.require_owner(principal, call_id, generation)
+        snapshot = _browser_watchdog_snapshot(msg.get("watchdog"))
+        client_reason = msg.get("client_reason")
+        if client_reason not in CLIENT_REASONS:
+            client_reason = None
+        if runtime.manager is not None and (snapshot is not None or client_reason is not None):
+            data = {"terminal": True, "reason": client_reason or "watchdog"}
+            if snapshot is not None:
+                data["watchdog"] = snapshot
+            try:
+                runtime.manager.diagnostic_event(msg["call_id"], "client_reported", data)
+            except Exception:
+                runtime.manager.diagnostic_write_failures += 1
+        if runtime.session.owner is None:
+            teardown_complete = await runtime.wait_for_media_teardown()
+        else:
             teardown_complete = await runtime.revoke("OWNER_STOPPED")
         if not teardown_complete:
             raise Refused("TEARDOWN_TIMEOUT")
@@ -888,6 +922,51 @@ async def ws_stop(hass, connection, msg) -> None:
         _send_error(connection, msg, str(err))
         return
     connection.send_result(msg["id"], {"stopped": True})
+
+
+CLIENT_REASONS = {"watchdog", "control_lost", "media_ended", "user_hangup", "page_hidden",
+                  "audio_context", "microphone", "audio_processing", "setup_error", "other"}
+
+
+@websocket_api.websocket_command(
+    {probatio.Required("type"): "intercom_native/call_diagnostic", **OWNER_SCHEMA,
+     probatio.Required("snapshot"): dict, probatio.Optional("terminal"): bool,
+     probatio.Optional("client_reason"): str})
+@websocket_api.async_response
+async def ws_call_diagnostic(hass, connection, msg) -> None:
+    try:
+        manager = _runtime(hass).manager
+        call_id = _decode_id(msg["call_id"])
+        generation = _decode_generation(msg["owner_generation"])
+        binding = manager.diagnostic_owners.get(msg["call_id"]) if manager else None
+        if binding is None or binding[1] != generation:
+            raise Refused("NOT_OWNER")
+        runtime = _runtime(hass, device_id=binding[2])
+        principal = runtime.principal_from_connection(connection)
+        if principal != binding[0]:
+            raise Refused("NOT_OWNER")
+        snapshot = _browser_watchdog_snapshot(msg["snapshot"])
+        if snapshot is None:
+            raise Refused("INVALID_REQUEST")
+        import time
+        # The rate limit belongs to the original call, independently of any new owner.
+        rates = manager.diagnostic_rates
+        now = time.monotonic()
+        terminal = msg.get("terminal", False)
+        if terminal:
+            reason = msg.get("client_reason")
+            if reason not in CLIENT_REASONS:
+                raise Refused("INVALID_REQUEST")
+            key = msg["call_id"] + ":terminal"
+            if key not in rates:
+                rates[key] = now
+                manager.diagnostic_event(msg["call_id"], "client_reported", {"terminal": True, "reason": reason, "watchdog" if reason == "watchdog" else "last_snapshot": snapshot})
+        elif now - rates.get(msg["call_id"], -10) >= 5:
+            rates[msg["call_id"]] = now
+            manager.diagnostic_event(msg["call_id"], "client_reported", {"snapshot": snapshot})
+        connection.send_result(msg["id"], {"accepted": True, "durable": False})
+    except Refused as err:
+        _send_error(connection, msg, str(err))
 
 
 @websocket_api.websocket_command(
@@ -1006,6 +1085,7 @@ COMMANDS = (
     ws_list_devices,
     ws_start,
     ws_stop,
+    ws_call_diagnostic,
     ws_admin_stop,
     ws_set_caller_tx_enabled,
     ws_request_duplex,

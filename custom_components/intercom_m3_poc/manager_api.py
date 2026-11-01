@@ -136,6 +136,12 @@ async def diagnostics(manager, user, principal, connection, msg):
                         "listener_failures": manager.listener_failures,
                         "runtime_cleanup_failures": manager.runtime_cleanup_failures,
                         "runtime_cleanup_pending": len(set(manager.runtimes) - {r["room_id"] for r in manager.configuration["rooms"]})},
+        "call_diagnostics": deepcopy(manager.diagnostic_records),
+        "diagnostic_persistence": {"write_failures": manager.diagnostic_write_failures,
+                                   "load_failed": manager.diagnostic_load_failed,
+                                   "loading": manager.diagnostic_loading,
+                                   "pending": manager.diagnostic_dirty or manager.diagnostic_task is not None,
+                                   "retention": "latest 100 calls, latest 40 events per call"},
         "rooms": [{"room_id": rid, "backend": r.backend, "state": r.state, "reason": r.reason,
                    "metrics": deepcopy(r.last_metrics)} for rid, r in manager.runtimes.items()],
         "limitations": ["Acoustic acceptance requires physical tests", "ICM3 does not support manual answer or volume control"]}
