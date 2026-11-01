@@ -2,9 +2,9 @@
 
 Home Assistant integration with a sidebar for room enrollment, permissions, calls, announcements, history and diagnostics.
 
-**Development alpha 0.4.4 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This candidate is prepared for HACS custom-repository installation; 0.4.4 live acceptance remains pending.
+**Development alpha 0.4.5 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This candidate is prepared for HACS custom-repository installation; 0.4.5 live acceptance remains pending.
 
-Version 0.4.4 adds room selection and automatic unmute recovery. Clock failure analysis and physical acceptance remain open. Version 0.4.3 adds descriptions for the existing Home Assistant actions. Version 0.4.2 added standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and kept all eight firmware files unchanged in 0.4.2. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
+Version 0.4.5 extends private enrollment lifetime and retains committed startup authority for the matching installation. Version 0.4.4 adds room selection and automatic unmute recovery. Clock failure analysis and physical acceptance remain open. Version 0.4.3 adds descriptions for the existing Home Assistant actions. Version 0.4.2 added standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and kept all eight firmware files unchanged in 0.4.2. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
 
 ## Alpha requirements and limits
 
@@ -15,7 +15,7 @@ Version 0.4.4 adds room selection and automatic unmute recovery. Clock failure a
 
 The **Speakers** page implements preparation, preflight, install, update/rollback and removal controls for the experimental permanent alpha. Connection enrollment uses Home Assistant's private native options flow; passwords and generated trust stay outside the replaceable component tree. Installing the integration alone does not install or start speaker firmware. Physical deployment requires an explicitly reviewed development-device checkpoint; first-install and recovery acceptance remain open.
 
-The permanent startup design waits for fresh authenticated Home Assistant time authority after boot or process replacement; it must not resume using an old authority record. Enrollment credentials last seven days. Whole-device M4A hardening, physical reboot/power-loss/recovery, overlap/AEC, additional models, remote/caregiver use, production readiness and live HACS install/update/rollback acceptance remain unproved. Offline tests are not physical installation acceptance.
+The permanent startup design waits for fresh authenticated Home Assistant time authority after boot or process replacement; it must not resume using an old authority record. New private device enrollment certificates last approximately ten years (3,653 days). Replace the paired enrollment through the installation workflow before expiry; it does not renew automatically. This device PKI is separate from browser-facing HTTPS. Whole-device M4A hardening, physical reboot/power-loss/recovery, overlap/AEC, additional models, remote/caregiver use, production readiness and live HACS install/update/rollback acceptance remain unproved. Offline tests are not physical installation acceptance.
 
 Simulation permits interface preparation without a live speaker. Treat a room's reported availability as current status, not a guarantee of physical audio, microphone or indicator health. Assist setup is outside this package's installation procedure.
 

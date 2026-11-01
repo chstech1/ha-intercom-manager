@@ -27,7 +27,7 @@ PUBLIC_FILES = {"application", "S99ha-speaker", "bootstrap.sh", "transaction.sh"
                 "S98intercom-recover", "attention.wav", "bundle.sha256", "compatibility.json"}
 LIVE_BLOCKERS = ["EXACT_PHYSICAL_CHECKPOINT_REQUIRED", "NATIVE_HA_CLOCK_ACCEPTANCE_REQUIRED",
                  "MONITOR_ADOPTION_DEVICE_ACCEPTANCE_REQUIRED", "DURABLE_RECOVERY_DEVICE_ACCEPTANCE_REQUIRED"]
-ALPHA_LIMITATIONS = ["PRIVATE_CLOCK_FLOOR_NOT_PROTECTED_ANTIROLLBACK", "SEVEN_DAY_ALPHA_ENROLLMENT"]
+ALPHA_LIMITATIONS = ["PRIVATE_CLOCK_FLOOR_NOT_PROTECTED_ANTIROLLBACK"]
 FIXED_ACCESS_ERRORS = {"AUTHENTICATION_FAILED", "HOST_KEY_REJECTED", "IDENTITY_MISMATCH", "UNSUPPORTED_PLATFORM", "INVALID_ENROLLMENT"}
 REMOTE_PRIVATE = "/data/intercom-m56-install/private"
 MAX_PRIVATE_JSON = 32768
@@ -127,7 +127,7 @@ def _identities(directory, device_id, ha_id):
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    start, end = now - timedelta(minutes=1), now + timedelta(days=7)
+    start, end = now - timedelta(minutes=1), now + timedelta(days=3653)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Intercom alpha enrollment CA")])
     ca = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
@@ -668,10 +668,10 @@ class DeploymentManager:
             "device_uptime": metadata.uptime_seconds}
         _private_write(directory / "runtime.expected", "".join(f"{key}\t{value}\n" for key, value in values.items()).encode())
 
-    def _approval(self, device_id, operation):
+    def _approval(self, device_id, operation, accepted_boot=False):
         accepted = self.root / device_id / operation["operation_id"] / "accepted-checkpoint.json"
-        path = accepted if accepted.exists() else self.root / device_id / "physical-checkpoint.json"
-        if not path.exists():
+        path = accepted if accepted.exists() else (None if accepted_boot else self.root / device_id / "physical-checkpoint.json")
+        if path is None or not path.exists():
             return None
         value = json.loads(_private_read(path))
         required = {"schema", "approved", "operation_id", "action", "target_binding_sha256", "compatibility_sha256",
@@ -684,7 +684,8 @@ class DeploymentManager:
                 or value["compatibility_sha256"] != json.loads(_private_read(self.root / device_id / operation["operation_id"] / "operation.json"))["compatibility_sha256"]
                 or value["bundle_manifest_sha256"] != json.loads(_private_read(self.root / device_id / operation["operation_id"] / "operation.json"))["bundle_manifest_sha256"]
                 or value["prepared_archive_sha256"] != operation.get("artifact_sha256")
-                or type(value["expires_epoch"]) is not int or not time.time() < value["expires_epoch"] <= time.time() + 7 * 86400):
+                or type(value["expires_epoch"]) is not int
+                or (not accepted_boot and not time.time() < value["expires_epoch"] <= time.time() + 7 * 86400)):
             raise DeploymentError("PHYSICAL_CHECKPOINT_MISMATCH")
         return value
 
@@ -960,7 +961,12 @@ class DeploymentManager:
                         raise DeploymentError("ENROLLMENT_EXPIRED")
                 if observed.prestate.application_mode == "stopped" and active is not None:
                     authority = active["approval_operation"]
-                    approval = await self.hass.async_add_executor_job(self._approval, device_id, authority)
+                    if (authority.get("operation_id") != active["operation_id"]
+                            or authority.get("action") not in {"install", "rollback_previous"}
+                            or active_record["configuration_sha256"] != active["configuration_sha256"]):
+                        raise DeploymentError("BOOT_BINDING_MISMATCH")
+                    # Only the committed matching install may reuse its accepted checkpoint for boot.
+                    approval = await self.hass.async_add_executor_job(self._approval, device_id, authority, True)
                     if approval is None:
                         raise DeploymentError("EXACT_PHYSICAL_CHECKPOINT_REQUIRED")
                     async with self.lock:
