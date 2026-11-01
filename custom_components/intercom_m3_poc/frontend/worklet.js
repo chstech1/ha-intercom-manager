@@ -18,6 +18,8 @@ class IntercomM3Processor extends AudioWorkletProcessor {
     this.played = 0;
     this.outputEndTime = null;
     this.captureEnabled = true;
+    this.captureEpoch = null;
+    this.playbackEpoch = null;
     this.port.onmessage = ({ data }) => {
       if (data?.type === "play" && data.samples instanceof Int16Array) {
         let queueDropped=false;
@@ -30,9 +32,22 @@ class IntercomM3Processor extends AudioWorkletProcessor {
       } else if (data?.type === "capture-enabled") {
         this.captureEnabled = Boolean(data.enabled);
         if (!this.captureEnabled) this.capture.length = 0;
+      } else if (data?.type === "capture-reset" && typeof data.challenge === "string" && /^[0-9A-F]{16}$/.test(data.challenge)) {
+        // This boundary is owned by the audio thread, not the independent HA
+        // control channel. Drop partial samples and filter history before any
+        // frame can carry the new epoch.
+        this.capture.length = 0;
+        this.history.fill(0);
+        this.historyAt = this.capturePhase = 0;
+        this.captureEpoch = data.challenge;
+        this.playbackEpoch = data.challenge;
       } else if (data?.type === "clear") {
         this.capture.length = 0;
         this.playback.length = 0;
+        this.history.fill(0);
+        this.historyAt = this.capturePhase = this.playbackPhase = 0;
+        this.playbackLast = this.playbackFiltered = this.played = 0;
+        if (typeof data.challenge === "string") this.port.postMessage({type:"clear-ack", challenge:data.challenge});
       }
     };
   }
@@ -74,7 +89,7 @@ class IntercomM3Processor extends AudioWorkletProcessor {
             this.capture.length = 0;
             if (this.captureOutstanding < 3) {
               this.captureOutstanding++;
-              this.port.postMessage({ type: "capture", samples, captureEndTime: (currentFrame + input.length) / sampleRate, outputEndTime: this.outputEndTime }, [samples.buffer]);
+              this.port.postMessage({ type: "capture", samples, captureEpoch: this.captureEpoch, captureEndTime: (currentFrame + input.length) / sampleRate, outputEndTime: this.outputEndTime }, [samples.buffer]);
             }
           }
         }
@@ -108,7 +123,7 @@ class IntercomM3Processor extends AudioWorkletProcessor {
       }
       if (this.played >= 512) {
         this.played %= 512;
-        this.port.postMessage({ type: "played", queuedFrames: this.playback.length, droppedFrames: this.playbackDrops, queueDrops:this.playbackQueueDrops, deadlineDrops:this.playbackDeadlineDrops, queueResidenceMaxUs:this.playbackQueueResidenceMaxUs });
+        this.port.postMessage({ type: "played", playbackEpoch:this.playbackEpoch, queuedFrames: this.playback.length, droppedFrames: this.playbackDrops, queueDrops:this.playbackQueueDrops, deadlineDrops:this.playbackDeadlineDrops, queueResidenceMaxUs:this.playbackQueueResidenceMaxUs });
       }
       // Piggyback local silent-output progress on bounded capture messages.
       // This is preflight health, never evidence of received room PCM.

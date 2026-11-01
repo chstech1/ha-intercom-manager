@@ -1,6 +1,6 @@
 {
   "format": "bounded provenance inventory; not a complete SBOM or license clearance",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "publication_status": "DEVELOPMENT_ALPHA_APACHE_2_0",
   "upstream": {
     "repository": "https://github.com/thirdreality/voice-music-assistant/tree/bf9f6838c432685ea8d6b01e9197e9eeedf59426",

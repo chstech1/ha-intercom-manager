@@ -662,19 +662,20 @@ class Runtime:
             self.last_media_report = self.session.clock()
             self.last_metrics = safe_metrics
             self.state = state
-            self.reason = reason
+            public_reason = re.sub(r"^(RECOVERY_(?:PAUSE|INPUT|READY))_[0-9A-F]{16}$", r"\1", reason)
+            self.reason = public_reason
             if "room_mic_muted" in safe_metrics:
                 self.room_mic_muted = bool(safe_metrics["room_mic_muted"])
             if self.manager is not None:
                 # Persist transitions and a low-rate progress sample, never individual frames.
                 import time
                 stamp = time.monotonic()
-                signature = (state, reason, getattr(owner, "mode", "full_duplex"), self.room_mic_muted)
+                signature = (state, public_reason, getattr(owner, "mode", "full_duplex"), self.room_mic_muted)
                 if signature != getattr(owner, "diagnostic_signature", None) or stamp - getattr(owner, "diagnostic_at", 0) >= 5:
                     owner.diagnostic_signature, owner.diagnostic_at = signature, stamp
                     progress = {k: safe_metrics[k] for k in ("uplink_frames", "downlink_frames", "endpoint_sink_frames", "endpoint_capture_frames", "room_mic_muted") if k in safe_metrics and type(safe_metrics[k]) in (int, bool) and 0 <= safe_metrics[k] <= 2**53-1}
                     try:
-                        self.manager.diagnostic_event(_b64(owner.call_id), "server", {"state": state, "reason": reason, "mode": signature[2], "progress": progress})
+                        self.manager.diagnostic_event(_b64(owner.call_id), "server", {"state": state, "reason": public_reason, "mode": signature[2], "progress": progress})
                     except Exception:
                         self.manager.diagnostic_write_failures += 1
             self._emit(owner, state, reason, safe_metrics)
@@ -857,7 +858,7 @@ def _browser_watchdog_snapshot(value):
     fields = {"frontendBuild", "captureStalled", "outputStalled", "contextRunning",
               "captureAgeMs", "outputAgeMs", "contextState", "backendState",
               "callMode", "lastActiveMode", "roomMuted", "expectRoomPlayback"}
-    if type(value) is not dict or set(value) != fields or value["frontendBuild"] not in ("0.4.8", "0.4.9"):
+    if type(value) is not dict or set(value) != fields or value["frontendBuild"] not in ("0.4.8", "0.4.9", "0.4.10"):
         return None
     if any(type(value[k]) is not bool for k in ("captureStalled", "outputStalled",
                                                   "contextRunning", "expectRoomPlayback")):
@@ -931,7 +932,8 @@ CLIENT_REASONS = {"watchdog", "control_lost", "media_ended", "user_hangup", "pag
 @websocket_api.websocket_command(
     {probatio.Required("type"): "intercom_native/call_diagnostic", **OWNER_SCHEMA,
      probatio.Required("snapshot"): dict, probatio.Optional("terminal"): bool,
-     probatio.Optional("client_reason"): str})
+     probatio.Optional("client_reason"): str, probatio.Optional("playback_frames"): int,
+     probatio.Optional("playback_epoch"): str})
 @websocket_api.async_response
 async def ws_call_diagnostic(hass, connection, msg) -> None:
     try:
@@ -949,6 +951,25 @@ async def ws_call_diagnostic(hass, connection, msg) -> None:
         if snapshot is None:
             raise Refused("INVALID_REQUEST")
         import time
+        # Ephemeral owner-bound playback evidence for recovery rearming. It is
+        # deliberately not added to the bounded persistent diagnostic record.
+        current = runtime.session.owner
+        if "playback_frames" in msg and current is not None and runtime.current_owner(current):
+            count = msg["playback_frames"]
+            if (current.call_id == call_id and current.generation == generation
+                    and current.principal == principal and getattr(current, "recovery_epoch", None) is not None
+                    and msg.get("playback_epoch") == current.recovery_epoch):
+                previous = getattr(current, "recovery_playback", None)
+                healthy = (type(count) is int and 0 <= count <= 2**53-1
+                           and snapshot["backendState"] == "ACTIVE_FULL"
+                           and snapshot["callMode"] == "full_duplex"
+                           and snapshot["lastActiveMode"] == "full_duplex"
+                           and snapshot["expectRoomPlayback"] and snapshot["contextRunning"]
+                           and not snapshot["captureStalled"] and not snapshot["outputStalled"]
+                           and snapshot["roomMuted"] is False
+                           and snapshot["outputAgeMs"] is not None and snapshot["outputAgeMs"] <= 1000)
+                current.recovery_playback = ((count, time.monotonic()) if healthy
+                    and (previous is None or count > previous[0]) else None)
         # The rate limit belongs to the original call, independently of any new owner.
         rates = manager.diagnostic_rates
         now = time.monotonic()

@@ -7,14 +7,20 @@ const text = new TextEncoder();
 // A nonresponsive HA command has no public cancellation API. Keep at most one
 // diagnostic request per connection, across panels and calls, until it settles.
 const diagnosticConnections = globalThis[Symbol.for("intercom_m3_poc.diagnosticConnections")] ||= new WeakSet();
-function sendCallDiagnostic(connection, message) {
-  if (!connection || diagnosticConnections.has(connection)) return;
+const diagnosticQueued = globalThis[Symbol.for("intercom_m3_poc.diagnosticQueued")] ||= new WeakMap();
+function sendCallDiagnostic(connection, message, priority = false) {
+  if (!connection) return;
+  if (diagnosticConnections.has(connection)) {
+    const previous=diagnosticQueued.get(connection);
+    if ((message.terminal || priority || !Object.prototype.hasOwnProperty.call(message,"playback_frames")) && (!previous?.terminal || message.terminal)) diagnosticQueued.set(connection,message);
+    return;
+  }
   diagnosticConnections.add(connection);
+  const release=()=>{diagnosticConnections.delete(connection);const queued=diagnosticQueued.get(connection);diagnosticQueued.delete(connection);if(queued)sendCallDiagnostic(connection,queued,true);};
   try {
     Promise.resolve(connection.sendMessagePromise(message)).then(
-      () => diagnosticConnections.delete(connection),
-      () => diagnosticConnections.delete(connection));
-  } catch { diagnosticConnections.delete(connection); }
+      release, release);
+  } catch { release(); }
 }
 
 function b64url(value, bytes) {
@@ -70,8 +76,9 @@ function bounded(promise, ms, reason) { let timer; return Promise.race([promise,
 
 class ClockRelation {
   constructor(clock = () => performance.now()) { this.now = clock; this.pending = new Map(); this.updated = 0; this.offset = 0; this.uncertainty = Infinity; this.lastT1 = 0n; this.lastT2 = 0n; this.lastPeerSend = -Infinity; this.rejectedSamples=0; this.rejectedUncertaintyMax=0; }
-  ping() {
-    const payload = new ArrayBuffer(16), view = new DataView(payload), random = crypto.getRandomValues(new Uint8Array(8)), nonce = new DataView(random.buffer).getBigUint64(0, true), t1 = BigInt(Math.floor(this.now() * 1000));
+  ping(challenge = null) {
+    const payload = new ArrayBuffer(16), view = new DataView(payload), random = challenge === null ? crypto.getRandomValues(new Uint8Array(8)) : null, nonce = challenge === null ? new DataView(random.buffer).getBigUint64(0, true) : BigInt(`0x${challenge}`), t1 = BigInt(Math.floor(this.now() * 1000));
+    if (this.pending.has(nonce.toString())) throw new Error("CLOCK_INVALID");
     writeU64(view, 0, nonce); writeU64(view, 8, t1); this.pending.set(nonce.toString(), t1); while (this.pending.size > 3) this.pending.delete(this.pending.keys().next().value); return frame(TYPES.PING, new Uint8Array(payload));
   }
   pong(view) {
@@ -104,7 +111,7 @@ class IntercomM3PocPanel extends HTMLElement {
     this.onPageHide = () => this.cleanup("PAGE_HIDDEN", true);
     this.onVisibility = () => { if (document.visibilityState !== "visible") this.cleanup("PAGE_HIDDEN", true); };
   }
-  emptyMetrics() { return { pocVersion: this.panelConfig?.version || "0.4.9", frontendBuild:"0.4.9", callerInput:"unknown", callMode:this.callMode||"full_duplex", admissionAvailable:null, admissionBusy:null, simulation: this.panelConfig?.simulation!==false, endpointBackend:this.panelConfig?.backend||"simulation", path: "unknown", audioAgeLimitUs: 2000000, captureFrames: 0, capturePeak: 0, nonzeroCaptureFrames: 0, renderedFrames: 0, txDrops: 0, rxDrops: 0, staleDrops: 0, clockStaleDrops: 0, browserClockRejectedSamples: 0, browserClockRejectedUncertaintyMaxUs: 0, admissionExpiredDrops: 0, mainQueueDrops: 0, workletQueueDrops: 0, workletDeadlineDrops: 0, receivedMediaAgeMaxUs: 0, workletQueueResidenceMaxUs: 0, clockUncertaintyUs: 0, outputLeadUs: 0, baseLatencyUs: 0, outputLatencyUs: 0, clockFresh: false, backend: "IDLE", server: {}, physicalIoLatency: "unproven", acousticLatency: "unproven", outputRoute: "unknown" }; }
+  emptyMetrics() { return { pocVersion: this.panelConfig?.version || "0.4.10", frontendBuild:"0.4.10", callerInput:"unknown", callMode:this.callMode||"full_duplex", admissionAvailable:null, admissionBusy:null, simulation: this.panelConfig?.simulation!==false, endpointBackend:this.panelConfig?.backend||"simulation", path: "unknown", audioAgeLimitUs: 2000000, captureFrames: 0, capturePeak: 0, nonzeroCaptureFrames: 0, renderedFrames: 0, txDrops: 0, rxDrops: 0, staleDrops: 0, clockStaleDrops: 0, browserClockRejectedSamples: 0, browserClockRejectedUncertaintyMaxUs: 0, admissionExpiredDrops: 0, mainQueueDrops: 0, workletQueueDrops: 0, workletDeadlineDrops: 0, receivedMediaAgeMaxUs: 0, workletQueueResidenceMaxUs: 0, clockUncertaintyUs: 0, outputLeadUs: 0, baseLatencyUs: 0, outputLatencyUs: 0, clockFresh: false, backend: "IDLE", server: {}, physicalIoLatency: "unproven", acousticLatency: "unproven", outputRoute: "unknown" }; }
   setConfig(config) { if(this.callId||this.inflight||this.cleaning){this.pendingConfig={...this.pendingConfig,...config};return;} const previousDeviceId=this.panelConfig.device_id; this.panelConfig={...this.panelConfig,...config}; this.metrics=this.emptyMetrics(); if(config?.device_id&&config.device_id!==previousDeviceId)this.selectedDeviceId=String(config.device_id); this.render(); }
   set panel(value) { if (!this.callId && !this.inflight) this.setConfig(value?.config || {}); }
   set hass(value) { const previous=this._hass?.connection,next=value?.connection;if(previous!==next){this.roomRequest=Symbol();if(previous)this.rooms=[];this.roomLoad="unknown";if(previous&&this.roomControlLost)previous.removeEventListener?.("disconnected",this.roomControlLost);this.roomControlLost=()=>{this.roomRequest=Symbol();this.rooms=[];this.roomLoad="failed";this.render();};next?.addEventListener?.("disconnected",this.roomControlLost);}this._hass=value;this.render();if(previous!==next&&this.isConnected)this.refreshRooms(); }
@@ -146,7 +153,7 @@ class IntercomM3PocPanel extends HTMLElement {
     if (!globalThis.AudioContext || !globalThis.AudioWorkletNode || (!silent&&!navigator.mediaDevices?.getUserMedia)) return this.fail("This browser cannot provide the required audio path.");
     const device=announcement?{available:null,busy:null}:this.rooms.find(value=>value.deviceId===this.selectedDeviceId);if(!device)return this.fail("Select an enrolled room.");if(device.available===false||device.busy===true)return this.fail("Room is offline or busy.");
     if(announcement)this.callMode="speaker_only";
-    const attempt = ++this.attempt; this.retryOffered=false; this.inflight = true; this.roomRequest=Symbol();this.softMuted=false; this.metrics=this.emptyMetrics();this.metrics.callerInput=silent?"synthetic_silence":"microphone";this.metrics.admissionAvailable=device.available;this.metrics.admissionBusy=device.busy; this.resumeMessage="";this.mediaStarted=0; this.outputDevices=[]; this.lastCapture=0; this.lastPlayed=0; this.lastOutputProgress=0; this.mediaWasActive=false; this.lastActiveMode=null; this.fullModeStarted=0; this.status = silent?"Starting connection test with synthetic silence — microphone not tested":"Requesting microphone permission…"; this.render();
+    const attempt = ++this.attempt; this.retryOffered=false; this.inflight = true; this.roomRequest=Symbol();this.softMuted=false; this.captureEpoch=null; this.metrics=this.emptyMetrics();this.metrics.callerInput=silent?"synthetic_silence":"microphone";this.metrics.admissionAvailable=device.available;this.metrics.admissionBusy=device.busy; this.resumeMessage="";this.mediaStarted=0; this.outputDevices=[]; this.lastCapture=0; this.lastPlayed=0; this.lastOutputProgress=0; this.mediaWasActive=false; this.lastActiveMode=null; this.fullModeStarted=0; this.status = silent?"Starting connection test with synthetic silence — microphone not tested":"Requesting microphone permission…"; this.render();
     this.controlLost = () => this.cleanup("Home Assistant control connection lost.", false);
     this._hass.connection.addEventListener?.("disconnected", this.controlLost);
     try {
@@ -160,14 +167,15 @@ class IntercomM3PocPanel extends HTMLElement {
         this.permissionPromise=null; this.permissionPending=false; this.stream = stream; this.stream.getTracks().forEach(track => track.addEventListener("ended", () => this.cleanup("Microphone stopped.", true), { once: true }));
       }
       if (document.visibilityState !== "visible") throw new Error("PAGE_HIDDEN");
-      await bounded(this.ctx.audioWorklet.addModule("/intercom_m3_poc/worklet.js?v=0.4.9"), 5000, "WORKLET_LOAD_TIMEOUT"); this.assertAttempt(attempt);
+      await bounded(this.ctx.audioWorklet.addModule("/intercom_m3_poc/worklet.js?v=0.4.10-r3"), 5000, "WORKLET_LOAD_TIMEOUT"); this.assertAttempt(attempt);
       if (this.ctx.sampleRate < 16000) throw new Error("CAPTURE_RATE_UNSUPPORTED");
       this.node = new AudioWorkletNode(this.ctx, "intercom-m3-poc", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
       this.node.addEventListener("processorerror", () => this.cleanup("Audio processing failed.", true), { once: true });
       this.ctx.addEventListener("statechange", () => { if (this.inflight && this.ctx?.state !== "running") this.cleanup("Audio context stopped.", true); });
       if(silent){if(!this.ctx.createConstantSource)throw new Error("SILENT_INPUT_UNSUPPORTED");this.silenceSource=this.ctx.createConstantSource();this.silenceSource.offset.value=0;this.source=this.silenceSource;this.source.connect(this.node);this.source.start();}
       else {this.source = this.ctx.createMediaStreamSource(this.stream);this.source.connect(this.node);}
-      this.node.connect(this.ctx.destination); this.node.port.onmessage = event => this.onWorklet(event.data);
+      this.node.connect(this.ctx.destination); const callNode=this.node;
+      callNode.port.onmessage = event => { if(attempt===this.attempt && this.inflight && this.node===callNode) this.onWorklet(event.data); };
       const request=announcement?{...announcement,type:"intercom_native/start_announcement",source:{kind:"live",browser_instance_id:this.browserId}}:{type:"intercom_native/start",device_id:device.deviceId,browser_instance_id:this.browserId,mode:this.callMode};
       const rawStart=this._hass.connection.sendMessagePromise(request); this.pendingStart=rawStart; rawStart.then(started=>{if(started.call_id&&(attempt!==this.attempt||!this.inflight))this._hass?.connection?.sendMessagePromise({type:"intercom_native/stop",call_id:started.call_id,owner_generation:started.owner_generation}).catch(()=>{});},()=>{}).finally(()=>{if(this.pendingStart===rawStart)this.pendingStart=null;});
       const started = await bounded(rawStart, 5000, "CONTROL_TIMEOUT"); this.assertAttempt(attempt); this.pendingStart=null;
@@ -176,7 +184,7 @@ class IntercomM3PocPanel extends HTMLElement {
       this.callId = started.call_id; this.ownerGeneration = started.owner_generation; this.modeGeneration = started.mode_generation ?? 0;
       this.lastDiagnostic=performance.now();
       const context=["running","suspended","interrupted","closed"].includes(this.ctx?.state)?this.ctx.state:"unknown";
-      this.metrics.watchdog={frontendBuild:"0.4.9",captureStalled:false,outputStalled:false,contextRunning:context==="running",captureAgeMs:null,outputAgeMs:null,contextState:context,backendState:"PREPARING",callMode:this.callMode,lastActiveMode:"unknown",roomMuted:null,expectRoomPlayback:false};
+      this.metrics.watchdog={frontendBuild:"0.4.10",captureStalled:false,outputStalled:false,contextRunning:context==="running",captureAgeMs:null,outputAgeMs:null,contextState:context,backendState:"PREPARING",callMode:this.callMode,lastActiveMode:"unknown",roomMuted:null,expectRoomPlayback:false};
       sendCallDiagnostic(this._hass?.connection,{type:"intercom_native/call_diagnostic",call_id:this.callId,owner_generation:this.ownerGeneration,snapshot:this.metrics.watchdog});
       await bounded(this.subscribe(attempt), 5000, "SUBSCRIBE_TIMEOUT"); this.assertAttempt(attempt);
       await bounded(this.openMedia(attempt), 10000, "MEDIA_SETUP_TIMEOUT"); this.assertAttempt(attempt); await this.inspectOutputs();
@@ -189,6 +197,33 @@ class IntercomM3PocPanel extends HTMLElement {
   async subscribe(attempt) {
     const unsubscribe = await this._hass.connection.subscribeMessage(event => {
       if (!event || event.call_id !== this.callId || event.owner_generation !== this.ownerGeneration) return;
+      const recovery = /^RECOVERY_(PAUSE|INPUT|READY)_([0-9A-F]{16})$/.exec(event.reason || "");
+      if (recovery && event.state === "CONNECTING") {
+        const [, phase, challenge] = recovery;
+        if (phase === "PAUSE" && !this.recovery && (!this.recoveryUsed || (!this.recoveryUsed.has(challenge) && this.recoveryUsed.size < 64)) && this.inflight && this.callMode === "full_duplex" && this.node && this.ws?.readyState === WebSocket.OPEN) {
+          this.recovery = {challenge, stage:"clearing", callId:this.callId, owner:this.ownerGeneration, attempt:this.attempt};
+          (this.recoveryUsed ||= new Set()).add(challenge);
+          this.recoveryHealth = false;
+          this.playbackPending = [];
+          this.node.port.postMessage({type:"clear", challenge});
+          this.resumeMessage = "Reconnecting audio; the room will indicate before its microphone resumes.";
+        } else if (this.recovery?.challenge === challenge && this.recovery.callId === this.callId && this.recovery.owner === this.ownerGeneration && this.recovery.attempt === this.attempt) {
+          if (phase === "INPUT" && this.recovery.stage === "fenced") {
+            // A capture already queued on the worklet port may arrive after
+            // this independent control message. Only the reset epoch can send.
+            this.captureEpoch = challenge;
+            this.node.port.postMessage({type:"capture-reset", challenge});
+            this.recovery.stage = "input";
+          }
+          else if (phase === "READY" && this.recovery.stage === "input") {
+            this.recovery = null;
+            this.recoveryHealth = true;
+            this.fullModeStarted = performance.now();
+            this.resumeMessage = "";
+          }
+        }
+      }
+      if (event.reason === "RECOVERY_REARMED") this.recoveryHealth = false;
       this.modeGeneration=Number.isSafeInteger(event.mode_generation)&&event.mode_generation>=0&&event.mode_generation<=0xffffffff?event.mode_generation:null;
       if(event.state==="ACTIVE_FULL"||event.metrics?.room_mic_muted===true)this.resumeMessage="";
       else if(event.reason==="UPGRADE_PENDING")this.resumeMessage="Resuming the room microphone; the room will indicate before capture resumes.";
@@ -224,22 +259,30 @@ class IntercomM3PocPanel extends HTMLElement {
       const filterDelay=(31/this.ctx.sampleRate)*1_000_000, quantum=128/this.ctx.sampleRate*1_000_000, contextHold = Math.max(0, (this.ctx.currentTime - data.captureEndTime) * 1_000_000)+quantum, freshCapture = contextHold <= 64000;
       if(freshCapture)this.lastCapture = performance.now(); else this.metrics.txDrops++;
       if (freshCapture && Number.isFinite(data.outputEndTime) && this.ctx.currentTime >= data.outputEndTime && this.ctx.currentTime - data.outputEndTime <= .064) this.lastOutputProgress = performance.now();
-      if (freshCapture && !this.softMuted && this.clock?.fresh() && this.peerPingSeen && this.ws?.readyState === WebSocket.OPEN) {
+      if (freshCapture && !this.softMuted && (data.captureEpoch ?? null) === (this.captureEpoch ?? null) && (!this.recovery || this.recovery.stage === "input") && this.clock?.fresh() && this.peerPingSeen && this.ws?.readyState === WebSocket.OPEN) {
         if (!canQueueAudio(this.ws.bufferedAmount)) this.metrics.txDrops++;
         else if (this.txSequence >= 0xffffffff) this.cleanup("Media sequence exhausted.", true);
         else { const payload = new Uint8Array(1042), view = new DataView(payload.buffer), age = Math.min(0xffffffff, Math.ceil(32000 + contextHold + filterDelay)); view.setUint32(0, this.txSequence++, true); writeU64(view, 4, nowUs()); view.setUint32(12, age, true); view.setUint16(16, 512, true); payload.set(new Uint8Array(data.samples.buffer), 18); this.ws.send(frame(TYPES.AUDIO, payload)); }
       }
       this.node?.port.postMessage({type:"capture-ack"});
+    } else if (data?.type === "clear-ack") {
+      const recovery = this.recovery;
+      if (recovery && recovery.stage === "clearing" && data.challenge === recovery.challenge && recovery.callId === this.callId && recovery.owner === this.ownerGeneration && recovery.attempt === this.attempt && this.inflight && this.ws?.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(this.clock.ping(recovery.challenge));
+          recovery.stage = "fenced";
+        } catch { this.cleanup("Media ended: CLOCK_INVALID", true); }
+      }
     } else if (data?.type === "playback-accepted") { this.playbackPortInflight=Math.max(0,this.playbackPortInflight-1); this.pumpPlayback(); }
     else if (data?.type === "played" || data?.type === "playback-stats") {
       this.metrics.workletQueueDrops=Math.max(this.metrics.workletQueueDrops,data.queueDrops||0);
       this.metrics.workletDeadlineDrops=Math.max(this.metrics.workletDeadlineDrops,data.deadlineDrops||0);
       this.metrics.workletQueueResidenceMaxUs=Math.max(this.metrics.workletQueueResidenceMaxUs,data.queueResidenceMaxUs||0);
       this.metrics.rxDrops=this.metrics.mainQueueDrops+this.metrics.workletQueueDrops+this.metrics.workletDeadlineDrops;
-      if(data.type==="played"){this.metrics.renderedFrames++;this.lastPlayed=performance.now();}
+      if(data.type==="played"&&(data.playbackEpoch??null)===(this.captureEpoch??null)){this.metrics.renderedFrames++;this.lastPlayed=performance.now();}
     }
   }
-  pumpPlayback() { while(this.inflight&&this.node&&this.playbackPortInflight<2&&this.playbackPending?.length){ const item=this.playbackPending.shift(); this.playbackPortInflight++; this.node.port.postMessage(item,[item.samples.buffer]); } }
+  pumpPlayback() { while(this.inflight&&!this.recovery&&this.node&&this.playbackPortInflight<2&&this.playbackPending?.length){ const item=this.playbackPending.shift(); this.playbackPortInflight++; this.node.port.postMessage(item,[item.samples.buffer]); } }
   onMedia({ type, view }) {
     if (type === TYPES.AUDIO) {
       const received = performance.now(), seq = view.getUint32(0, true); if (seq !== this.rxSequence || this.rxSequence >= 0xffffffff) throw new Error("INVALID_SEQUENCE"); this.rxSequence++;
@@ -254,6 +297,7 @@ class IntercomM3PocPanel extends HTMLElement {
       this.metrics.clockUncertaintyUs=Math.ceil(this.clock.uncertainty||0);
       this.metrics.outputLatencyUs=Math.ceil(outputLatency*1_000_000);this.metrics.baseLatencyUs=Math.ceil(baseLatency*1_000_000);this.metrics.outputLeadUs=Math.ceil(outputLead);
       if (age + outputLead > ceiling) { this.metrics.staleDrops++; this.metrics.admissionExpiredDrops++; return; }
+      if (this.recovery) { this.metrics.rxDrops++; return; }
       const samples = new Int16Array(512); for(let i=0;i<512;i++) samples[i]=view.getInt16(18+i*2,true);
       const item={type:"play",samples,deadline:this.ctx.currentTime+(ceiling-age-outputLead)/1_000_000}; if(this.playbackPending.length===1){this.playbackPending.shift();this.metrics.mainQueueDrops++;this.metrics.rxDrops++;} this.playbackPending.push(item); this.pumpPlayback();
     } else if (type === TYPES.PING) { const payload = new ArrayBuffer(32), out = new DataView(payload), t2=nowUs(); writeU64(out,0,view.getBigUint64(0,true)); writeU64(out,8,view.getBigUint64(8,true)); writeU64(out,16,t2); writeU64(out,24,nowUs()); this.ws.send(frame(TYPES.PONG,new Uint8Array(payload))); this.peerPingSeen=true; }
@@ -276,15 +320,16 @@ class IntercomM3PocPanel extends HTMLElement {
     const elapsed=now-(this.mediaStarted||now);
     // READY proves the local graph before START. Actual room PCM remains
     // required after activation; waiting for it before READY deadlocks startup.
-    const expectRoomPlayback=this.mediaWasActive&&!explicitOneWay&&!roomMuted&&this.lastActiveMode==="full_duplex";
+    const expectRoomPlayback=this.mediaWasActive&&!this.recovery&&!explicitOneWay&&!roomMuted&&this.lastActiveMode==="full_duplex";
     const outputStamp=expectRoomPlayback?Math.max(this.lastPlayed||0,this.fullModeStarted||0):this.lastOutputProgress;
     const captureStalled=elapsed>2000&&now-(this.lastCapture||this.mediaStarted)>2000,outputStalled=elapsed>2000&&now-(outputStamp||this.mediaStarted)>2000;
     {
       const age=stamp=>stamp>0?Math.min(60000,Math.max(0,Math.round((now-stamp)/100)*100)):null;
       const context=["running","suspended","interrupted","closed"].includes(this.ctx?.state)?this.ctx.state:"unknown";
       const backendState=["PREPARING","CONNECTING","ACTIVE_FULL","ACTIVE_SPEAKER_ONLY"].includes(this.metrics.backend)?this.metrics.backend:"other";
-      this.metrics.watchdog={frontendBuild:"0.4.9",captureStalled,outputStalled,contextRunning:context==="running",captureAgeMs:age(this.lastCapture||this.mediaStarted),outputAgeMs:age(outputStamp||this.mediaStarted),contextState:context,backendState,callMode:explicitOneWay?"speaker_only":"full_duplex",lastActiveMode:["speaker_only","full_duplex"].includes(this.lastActiveMode)?this.lastActiveMode:"unknown",roomMuted:typeof this.metrics.server?.room_mic_muted==="boolean"?this.metrics.server.room_mic_muted:null,expectRoomPlayback};
-      if(this.callId&&now-(this.lastDiagnostic??-Infinity)>=5000){this.lastDiagnostic=now;sendCallDiagnostic(this._hass?.connection,{type:"intercom_native/call_diagnostic",call_id:this.callId,owner_generation:this.ownerGeneration,snapshot:this.metrics.watchdog});}
+      this.metrics.watchdog={frontendBuild:"0.4.10",captureStalled,outputStalled,contextRunning:context==="running",captureAgeMs:age(this.lastCapture||this.mediaStarted),outputAgeMs:age(outputStamp||this.mediaStarted),contextState:context,backendState,callMode:explicitOneWay?"speaker_only":"full_duplex",lastActiveMode:["speaker_only","full_duplex"].includes(this.lastActiveMode)?this.lastActiveMode:"unknown",roomMuted:typeof this.metrics.server?.room_mic_muted==="boolean"?this.metrics.server.room_mic_muted:null,expectRoomPlayback};
+      if(this.callId&&now-(this.lastDiagnostic??-Infinity)>=5000){this.lastDiagnostic=now;this.lastPlaybackReport=now;sendCallDiagnostic(this._hass?.connection,{type:"intercom_native/call_diagnostic",call_id:this.callId,owner_generation:this.ownerGeneration,snapshot:this.metrics.watchdog,...(this.recoveryHealth?{playback_frames:this.metrics.renderedFrames,playback_epoch:this.captureEpoch}: {})},true);}
+      else if(this.callId&&this.recoveryHealth&&now-(this.lastPlaybackReport??-Infinity)>=1000){this.lastPlaybackReport=now;sendCallDiagnostic(this._hass?.connection,{type:"intercom_native/call_diagnostic",call_id:this.callId,owner_generation:this.ownerGeneration,snapshot:this.metrics.watchdog,playback_frames:this.metrics.renderedFrames,playback_epoch:this.captureEpoch});}
       if(this.inflight&&(captureStalled||outputStalled||this.ctx?.state!=="running")&&elapsed>2000){this.cleanup("Media progress stopped.",true);return;}
     }
     if(this.inflight&&!this.mediaWasActive&&elapsed>10000){this.cleanup("Media setup timed out.",true);return;}
@@ -337,7 +382,7 @@ class IntercomM3PocPanel extends HTMLElement {
   }
   async cleanup(reason, tellServer) {
     if(this.cleaning)return this.cleanupPromise;
-    this.cleaning=true; this.inflight=false; this.attempt++;this.resumePending=false;this.resumeMessage="";
+    this.cleaning=true; this.inflight=false; this.attempt++;this.resumePending=false;this.resumeMessage="";this.recovery=null;this.recoveryUsed=null;this.recoveryHealth=false;this.captureEpoch=null;
     const callId=this.callId, ownerGeneration=this.ownerGeneration, ctx=this.ctx, awaitingPermission=this.permissionPending;
     const clientReason=reason==="Media progress stopped."?"watchdog":reason==="Home Assistant control connection lost."?"control_lost":/^(Call|Media) ended:/.test(reason||"")?"media_ended":reason==="USER_HANGUP"?"user_hangup":/PAGE_HIDDEN|PANEL_REMOVED|LEFT_CALL_SCREEN/.test(reason||"")?"page_hidden":reason==="Audio context stopped."?"audio_context":reason==="Microphone stopped."?"microphone":reason==="Audio processing failed."?"audio_processing":/^Call unavailable:/.test(reason||"")?"setup_error":"other";
     if(callId&&this.metrics.watchdog)sendCallDiagnostic(this._hass?.connection,{type:"intercom_native/call_diagnostic",call_id:callId,owner_generation:ownerGeneration,snapshot:this.metrics.watchdog,terminal:true,client_reason:clientReason}); this.permissionPromise=null; this.pendingStart=null; this.callId=null; this.ownerGeneration=null; this.intervals?.forEach(clearInterval); this.intervals=[]; try{this.unsubscribe?.();}catch{} this.unsubscribe=null;
@@ -346,7 +391,7 @@ class IntercomM3PocPanel extends HTMLElement {
     const outputAudio=this.outputAudio, outputBridge=this.outputBridge;this.outputAudio=null;this.outputBridge=null;this.outputDevices=[];this.routingPending=false;
     if(outputAudio){try{outputAudio.pause();outputAudio.srcObject=null;outputAudio.remove();}catch{}}
     outputBridge?.stream.getTracks().forEach(track=>track.stop());
-    this.retryOffered=reason==="Media progress stopped."||/^(?:Call|Media) ended: (?:CLOCK_(?:INVALID|STALE|UNTRUSTED)|ENDPOINT_(?:CLOSED|IO_ERROR|TLS_ERROR|END_(?:9|10|11))|MEDIA_TIMEOUT|UPGRADE_TIMEOUT)$/.test(reason||"");
+    this.retryOffered=reason==="Media progress stopped."||/^(?:Call|Media) ended: (?:CLOCK_(?:INVALID|STALE|UNTRUSTED)|ENDPOINT_(?:CLOSED|IO_ERROR|TLS_ERROR|BUSY_1|END_(?:9|10|11))|MEDIA_TIMEOUT|UPGRADE_TIMEOUT|RECOVERY_(?:TIMEOUT|NOT_READY))$/.test(reason||"");
     this.status=(this.retryOffered?"Audio was interrupted and the call ended. Select RETRY CALL to start a new call.":reason||"Call ended")+(awaitingPermission?" Dismiss the browser microphone prompt before starting another call.":""); this.metrics.backend="TERMINATED"; this.render();
     this.cleanupPromise=(async()=>{ if(ctx)await bounded(ctx.close(),3000,"AUDIO_CLOSE_TIMEOUT").catch(()=>{}); if(tellServer&&callId&&this._hass?.connection)await bounded(this._hass.connection.sendMessagePromise({type:"intercom_native/stop",call_id:callId,owner_generation:ownerGeneration,client_reason:clientReason,...(reason==="Media progress stopped."&&this.metrics.watchdog?{watchdog:this.metrics.watchdog}:{})}),3000,"STOP_TIMEOUT").catch(()=>{}); this.cleaning=false; if(this.pendingConfig){const config=this.pendingConfig;this.pendingConfig=null;this.setConfig(config);}else this.render(); })();
     return this.cleanupPromise;

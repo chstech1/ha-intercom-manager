@@ -32,10 +32,10 @@ except ImportError:  # Standalone check imports this file directly.
 
 try:
     from .endpoint import (CLOCK_MEDIA_EXPIRY_US, EndpointClient, EndpointConfig,
-                           EndpointEnded, run_endpoint)
+                           EndpointEnded, EndpointPeerEof, EndpointFrameTruncated, run_endpoint)
 except ImportError:
     from endpoint import (CLOCK_MEDIA_EXPIRY_US, EndpointClient, EndpointConfig,
-                          EndpointEnded, run_endpoint)
+                          EndpointEnded, EndpointPeerEof, EndpointFrameTruncated, run_endpoint)
 
 
 READY = struct.Struct("<BIBH")
@@ -319,6 +319,14 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
     loop = asyncio.get_running_loop()
     browser_clock = ClockRelation()
     endpoint_context = [None]
+    browser_tasks = []
+    recovery = {"paused": False, "challenge": None, "browser_marker": asyncio.Event(),
+                "server_marker": asyncio.Event(), "server_nonce": None, "transition": 0.0,
+                "binding": False, "ready": asyncio.Event(), "in_progress": False,
+                "attempted": False, "eof_reported": False, "armed": True,
+                "qualified": False, "healthy_at": 0.0, "stable_since": 0.0,
+                "baseline": None, "streak_tx": None, "rearmed_notice": False,
+                "incidents": 0, "native_owners": {owner.generation}}
     browser_control: asyncio.Queue[bytes] = asyncio.Queue(maxsize=16)
     browser_audio: deque[tuple[int, int, bytes, int]] = deque(maxlen=3)
     browser_audio_ready = asyncio.Event()
@@ -349,9 +357,114 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
         except TimeoutError:
             raise MediaEnded("CONTROL_BLOCKED") from None
 
+    async def browser_writer() -> None:
+        sequence = 0
+        while valid() and not stop.is_set():
+            audio_generation = None
+            try:
+                frame = browser_control.get_nowait()
+            except asyncio.QueueEmpty:
+                if not browser_audio:
+                    browser_audio_ready.clear()
+                    try:
+                        await asyncio.wait_for(browser_audio_ready.wait(), .02)
+                    except TimeoutError:
+                        continue
+                if not browser_audio:
+                    continue
+                generated, prior, pcm, audio_generation = browser_audio.popleft()
+                hold_us = max(0, int(loop.time() * 1_000_000) - generated)
+                metrics["browser_downlink_queue_hold_max_ms"] = max(
+                    metrics["browser_downlink_queue_hold_max_ms"], hold_us // 1_000)
+                metrics["browser_downlink_age_max_ms"] = max(
+                    metrics["browser_downlink_age_max_ms"], (prior + hold_us) // 1_000)
+                frame = encode_frame(3, AUDIO.pack(sequence, generated, prior, SAMPLES, pcm))
+                sequence += 1
+            await asyncio.wait_for(ws.send_bytes(frame), .25)
+            if len(frame) > 100:
+                metrics["downlink_frames"] += 1
+                endpoint = endpoint_context[0]
+                if endpoint is not None and audio_generation == endpoint.mode_generation and endpoint.mode == "full_duplex":
+                    shared["browser_downlink"] = loop.time()
+
+    async def browser_reader() -> None:
+        expected = 0
+        while valid():
+            msg = await ws.receive()
+            if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING, WSMsgType.ERROR):
+                raise MediaEnded("SOCKET_CLOSED")
+            if msg.type != WSMsgType.BINARY:
+                raise MediaEnded("INVALID_FRAME")
+            kind, payload = decode_frame(msg.data)
+            now = loop.time()
+            now_us = int(now * 1_000_000)
+            if kind == 3:
+                sent, prior, pcm = decode_audio(payload, expected)
+                expected += 1
+                age = browser_clock.age_upper(sent, prior, now_us, now)
+                metrics["browser_uplink_age_max_ms"] = max(
+                    metrics["browser_uplink_age_max_ms"], age // 1_000)
+                if age > ceiling:
+                    metrics["stale_drops"] += 1
+                    continue
+                endpoint = endpoint_context[0]
+                if endpoint is not None and not recovery["paused"] and bool(getattr(owner, "caller_tx_enabled", True)):
+                    before = len(endpoint.audio)
+                    endpoint.send_audio(now_us, age, pcm)
+                    if before == endpoint.audio.maxlen:
+                        metrics["queue_drops"] += 1
+                    metrics["uplink_frames"] += 1
+                    shared["browser_uplink"] = now
+            elif kind == 4:
+                bits, rate, route, reserved = READY.unpack(payload)
+                required = 15 if mode == "full_duplex" else 14
+                if reserved or route > 1 or not 8_000 <= rate <= 192_000 or bits & ~15 or bits & required != required:
+                    raise MediaEnded("MEDIA_NOT_READY")
+                shared["ready"] = now
+            elif kind == 5:
+                nonce, t1 = PING.unpack(payload)
+                t2 = int(loop.time() * 1_000_000)
+                await browser_put(encode_frame(6, PONG.pack(nonce, t1, t2, int(loop.time() * 1_000_000))))
+                if recovery["paused"] and nonce == recovery["challenge"]:
+                    recovery["browser_marker"].set()
+            elif kind == 6:
+                nonce = PONG.unpack(payload)[0]
+                browser_clock.pong(payload, now_us, now)
+                if recovery["paused"] and nonce == recovery["server_nonce"]:
+                    recovery["server_marker"].set()
+                metrics["browser_clock_rejected_samples"] = browser_clock.rejected_samples
+                metrics["browser_clock_rejected_uncertainty_max_ms"] = (
+                    browser_clock.rejected_uncertainty_max_ms)
+            else:
+                raise MediaEnded("INVALID_FRAME")
+        raise MediaEnded("OWNER_REVOKED")
+
+    async def browser_pinger() -> None:
+        while valid():
+            await browser_put(browser_clock.ping(int(loop.time() * 1_000_000)))
+            await asyncio.sleep(1)
+
+
     async def bridge(endpoint: EndpointClient) -> None:
         endpoint_context[0] = endpoint
         def mode_changed() -> None:
+            if endpoint.room_mic_muted:
+                now = loop.time()
+                recovery["transition"] = now
+                playback = getattr(owner, "recovery_playback", None)
+                stamps = [shared["ready"], shared["endpoint_sink"],
+                          shared["endpoint_capture"], shared["browser_downlink"]]
+                if getattr(owner, "caller_tx_enabled", True):
+                    stamps.append(shared["browser_uplink"])
+                if (recovery["qualified"] and now - recovery["healthy_at"] <= .25
+                        and recovery["incidents"] < 64 and valid() and browser_clock.fresh(now)
+                        and playback is not None and now - playback[1] <= 1.5
+                        and all(stamp > 0 and now - stamp <= no_progress for stamp in stamps)):
+                    recovery["armed"] = True
+                    recovery["rearmed_notice"] = True
+            recovery["qualified"] = False
+            recovery["stable_since"] = 0.0
+            recovery["baseline"] = None
             browser_audio.clear()
             shared["endpoint_capture"] = shared["browser_downlink"] = 0.0
 
@@ -367,84 +480,6 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
             await emit("ACTIVE_SPEAKER_ONLY", "UPGRADE_PENDING")
 
         owner.request_duplex = request_duplex
-
-        async def browser_writer() -> None:
-            sequence = 0
-            while valid() and not stop.is_set():
-                audio_generation = None
-                try:
-                    frame = browser_control.get_nowait()
-                except asyncio.QueueEmpty:
-                    if not browser_audio:
-                        browser_audio_ready.clear()
-                        try:
-                            await asyncio.wait_for(browser_audio_ready.wait(), .02)
-                        except TimeoutError:
-                            continue
-                    generated, prior, pcm, audio_generation = browser_audio.popleft()
-                    hold_us = max(0, int(loop.time() * 1_000_000) - generated)
-                    metrics["browser_downlink_queue_hold_max_ms"] = max(
-                        metrics["browser_downlink_queue_hold_max_ms"], hold_us // 1_000)
-                    metrics["browser_downlink_age_max_ms"] = max(
-                        metrics["browser_downlink_age_max_ms"], (prior + hold_us) // 1_000)
-                    frame = encode_frame(3, AUDIO.pack(sequence, generated, prior, SAMPLES, pcm))
-                    sequence += 1
-                await asyncio.wait_for(ws.send_bytes(frame), .25)
-                if len(frame) > 100:
-                    metrics["downlink_frames"] += 1
-                    if audio_generation == endpoint.mode_generation and endpoint.mode == "full_duplex":
-                        shared["browser_downlink"] = loop.time()
-
-        async def browser_reader() -> None:
-            expected = 0
-            while valid():
-                msg = await ws.receive()
-                if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING, WSMsgType.ERROR):
-                    raise MediaEnded("SOCKET_CLOSED")
-                if msg.type != WSMsgType.BINARY:
-                    raise MediaEnded("INVALID_FRAME")
-                kind, payload = decode_frame(msg.data)
-                now = loop.time()
-                now_us = int(now * 1_000_000)
-                if kind == 3:
-                    sent, prior, pcm = decode_audio(payload, expected)
-                    expected += 1
-                    age = browser_clock.age_upper(sent, prior, now_us, now)
-                    metrics["browser_uplink_age_max_ms"] = max(
-                        metrics["browser_uplink_age_max_ms"], age // 1_000)
-                    if age > ceiling:
-                        metrics["stale_drops"] += 1
-                        continue
-                    if bool(getattr(owner, "caller_tx_enabled", True)):
-                        before = len(endpoint.audio)
-                        endpoint.send_audio(now_us, age, pcm)
-                        if before == endpoint.audio.maxlen:
-                            metrics["queue_drops"] += 1
-                        metrics["uplink_frames"] += 1
-                        shared["browser_uplink"] = now
-                elif kind == 4:
-                    bits, rate, route, reserved = READY.unpack(payload)
-                    required = 15 if mode == "full_duplex" else 14
-                    if reserved or route > 1 or not 8_000 <= rate <= 192_000 or bits & ~15 or bits & required != required:
-                        raise MediaEnded("MEDIA_NOT_READY")
-                    shared["ready"] = now
-                elif kind == 5:
-                    nonce, t1 = PING.unpack(payload)
-                    t2 = int(loop.time() * 1_000_000)
-                    await browser_put(encode_frame(6, PONG.pack(nonce, t1, t2, int(loop.time() * 1_000_000))))
-                elif kind == 6:
-                    browser_clock.pong(payload, now_us, now)
-                    metrics["browser_clock_rejected_samples"] = browser_clock.rejected_samples
-                    metrics["browser_clock_rejected_uncertainty_max_ms"] = (
-                        browser_clock.rejected_uncertainty_max_ms)
-                else:
-                    raise MediaEnded("INVALID_FRAME")
-            raise MediaEnded("OWNER_REVOKED")
-
-        async def browser_pinger() -> None:
-            while valid():
-                await browser_put(browser_clock.ping(int(loop.time() * 1_000_000)))
-                await asyncio.sleep(1)
 
         async def endpoint_capture() -> None:
             while valid():
@@ -507,6 +542,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                     raise MediaEnded("UPGRADE_TIMEOUT")
                 if endpoint.unmute_edges != unmute_edges:
                     unmute_edges = endpoint.unmute_edges
+                    recovery["transition"] = now
                     if (getattr(owner, "initial_mode", mode) == "full_duplex"
                             and endpoint.upgrade_generation is None):
                         unmute_pending = (endpoint.mode_generation, now + 2)
@@ -557,6 +593,35 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                     required.append(uplink)
                 active = (endpoint.ready(now) and browser_clock.fresh(now)
                           and all(stamp > 0 and now - stamp <= no_progress for stamp in required))
+                if recovery["attempted"] and not recovery["armed"]:
+                    playback = getattr(owner, "recovery_playback", None)
+                    if recovery["streak_tx"] != current_tx_enabled:
+                        recovery["stable_since"] = 0.0
+                        recovery["baseline"] = None
+                        recovery["qualified"] = False
+                        recovery["streak_tx"] = current_tx_enabled
+                    healthy = (active and endpoint.mode == "full_duplex" and not endpoint.room_mic_muted
+                               and endpoint.upgrade_generation is None and playback is not None
+                               and now - playback[1] <= 1.5)
+                    if healthy:
+                        counts = (endpoint.status_rx_sequence, metrics["endpoint_capture_frames"],
+                                  metrics["downlink_frames"], metrics["uplink_frames"], playback[0])
+                        if not recovery["stable_since"]:
+                            recovery["stable_since"], recovery["baseline"] = now, counts
+                        base = recovery["baseline"]
+                        advanced = (counts[1] > base[1] and counts[2] > base[2] and counts[4] > base[4]
+                                    and (not current_tx_enabled or (counts[0] > base[0] and counts[3] > base[3])))
+                        recovery["healthy_at"] = now
+                        if now - recovery["stable_since"] >= 2 and advanced and not recovery["qualified"]:
+                            recovery["qualified"] = True
+                            await emit("ACTIVE_FULL", "RECOVERY_HEALTHY")
+                    else:
+                        recovery["qualified"] = False
+                        recovery["stable_since"] = 0.0
+                        recovery["baseline"] = None
+                if recovery["rearmed_notice"]:
+                    recovery["rearmed_notice"] = False
+                    await emit("CONNECTING", "RECOVERY_REARMED")
                 ever_active = ever_active or active
                 if active != shared["active"] or active and (endpoint.mode != last_mode or now - last_emit >= 1):
                     shared["active"] = active
@@ -575,17 +640,19 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                     raise MediaEnded("MEDIA_TIMEOUT")
             raise MediaEnded("OWNER_REVOKED")
 
-        tasks = [asyncio.create_task(coro()) for coro in
-                 (browser_writer, browser_reader, browser_pinger, endpoint_capture,
-                  muted_silence)]
+        if not browser_tasks:
+            browser_tasks.extend(asyncio.create_task(coro()) for coro in
+                                 (browser_writer, browser_reader, browser_pinger))
+        tasks = [asyncio.create_task(coro()) for coro in (endpoint_capture, muted_silence)]
+        watched = [*browser_tasks, *tasks]
         try:
             deadline = loop.time() + BROWSER_PREFLIGHT_TIMEOUT_S
-            while not (shared["ready"] and shared["browser_uplink"] and browser_clock.fresh(loop.time())):
+            while not (shared["ready"] and (shared["browser_uplink"] or not getattr(owner, "caller_tx_enabled", True)) and browser_clock.fresh(loop.time())):
                 if not await authorize():
                     raise MediaEnded("AUTH_REVOKED")
                 if loop.time() >= deadline:
                     raise MediaEnded("BROWSER_READY_TIMEOUT")
-                for task in tasks:
+                for task in watched:
                     if task.done():
                         if task.exception():
                             raise task.exception()
@@ -593,16 +660,49 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 await asyncio.sleep(.01)
             if not await authorize():
                 raise MediaEnded("AUTH_REVOKED")
+            if recovery["binding"]:
+                # Profile 4 idle status supplies the current physical policy;
+                # silence or a stale observation cannot authorize a new START.
+                deadline = loop.time() + 1.5
+                while not endpoint.last_status_received:
+                    if loop.time() >= deadline or not valid() or not await authorize():
+                        raise MediaEnded("RECOVERY_NOT_READY")
+                    await asyncio.sleep(.01)
+                if (loop.time() - endpoint.last_status_received > 1.5
+                        or endpoint.status_health & 0xe0 or not valid() or not await authorize()):
+                    raise MediaEnded("RECOVERY_NOT_READY")
             await endpoint.start()
+            if recovery["binding"]:
+                deadline = loop.time() + 8
+                while not endpoint.answered:
+                    if loop.time() >= deadline or not valid() or not await authorize():
+                        raise MediaEnded("RECOVERY_NOT_READY")
+                    for task in watched:
+                        if task.done():
+                            if task.exception():
+                                raise task.exception()
+                            raise MediaEnded("MEDIA_ENDED")
+                    await asyncio.sleep(.01)
+                if endpoint.room_mic_muted or not valid() or not await authorize():
+                    raise MediaEnded("RECOVERY_NOT_READY")
+                owner.mode, owner.mode_generation = endpoint.mode, endpoint.mode_generation
+                owner.recovery_playback = None
+                owner.recovery_epoch = f"{recovery['challenge']:016X}"
+                recovery["binding"] = False
+                await emit("CONNECTING", f"RECOVERY_READY_{recovery['challenge']:016X}")
+                recovery["in_progress"] = False
+                recovery["ready"].set()
             tasks.append(asyncio.create_task(watchdog()))
-            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            watched.append(tasks[-1])
+            done, _ = await asyncio.wait(watched, return_when=asyncio.FIRST_EXCEPTION)
             for task in done:
                 if task.exception():
                     raise task.exception()
         finally:
             owner.request_duplex = None
             endpoint.mode_changed = None
-            stop.set()
+            if endpoint_context[0] is endpoint:
+                endpoint_context[0] = None
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -612,10 +712,125 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
         async def renewal_authorize() -> bool:
             return valid() and await authorize()
 
-        await run_endpoint(config, owner.call_id, owner.generation, mode,
-                           getattr(owner, "mode_generation", 0), bridge,
-                           renewal_authorize, **({"pool": endpoint_pool} if endpoint_pool is not None else {}),
-                           **({"volume_config": volume_config} if volume_config is not None else {}))
+        options = {"pool": endpoint_pool, "defer_eof_reopen": True} if endpoint_pool is not None else {}
+        if volume_config is not None:
+            options["volume_config"] = volume_config
+        async def initial_runner():
+            await run_endpoint(config, owner.call_id, owner.generation, mode,
+                               getattr(owner, "mode_generation", 0), bridge,
+                               renewal_authorize, **options)
+
+        async def rebound_runner(native_owner):
+            rebound = asyncio.create_task(run_endpoint(config, owner.call_id, owner.generation,
+                                            "full_duplex", 0, bridge, renewal_authorize, **options))
+            ready = asyncio.create_task(recovery["ready"].wait())
+            try:
+                done, _ = await asyncio.wait((rebound, ready), timeout=12,
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if rebound in done:
+                    await rebound
+                    raise MediaEnded("RECOVERY_NOT_READY")
+                if ready not in done:
+                    raise MediaEnded("RECOVERY_TIMEOUT")
+                await rebound  # The setup budget must not limit the resumed call.
+            finally:
+                ready.cancel()
+                if not rebound.done():
+                    rebound.cancel()
+                await asyncio.gather(ready, rebound, return_exceptions=True)
+
+
+        runner = initial_runner
+        while True:
+            try:
+                await runner()
+                break
+            except EndpointPeerEof:
+                await emit("CONNECTING", "NATIVE_EOF_HEADER_0")
+                recovery["eof_reported"] = True
+                if endpoint_pool is None or config.endpoint_profile != 4:
+                    refusal = "RECOVERY_REFUSED_PROFILE"
+                elif not recovery["armed"] or recovery["incidents"] >= 64:
+                    refusal = "RECOVERY_REFUSED_BUDGET"
+                elif not valid():
+                    refusal = "RECOVERY_REFUSED_OWNER"
+                elif getattr(owner, "initial_mode", mode) != "full_duplex":
+                    refusal = "RECOVERY_REFUSED_INTENT"
+                elif not recovery["transition"] or loop.time() - recovery["transition"] > 3:
+                    refusal = "RECOVERY_REFUSED_TRANSITION"
+                elif not await authorize() or not valid():
+                    refusal = "RECOVERY_REFUSED_AUTH"
+                else:
+                    refusal = None
+                if refusal:
+                    await emit("CONNECTING", refusal)
+                    raise
+                await emit("CONNECTING", "RECOVERY_ELIGIBLE")
+                owner.recovery_epoch = None
+                owner.recovery_playback = None
+                recovery["in_progress"] = True
+                recovery["armed"] = False
+                recovery["qualified"] = False
+                recovery["stable_since"] = 0.0
+                recovery["baseline"] = None
+                recovery["incidents"] += 1
+                recovery["browser_marker"].clear()
+                recovery["server_marker"].clear()
+                recovery["server_nonce"] = None
+                recovery["ready"].clear()
+                recovery["attempted"] = True
+                recovery["paused"] = True
+                recovery["challenge"] = secrets.randbits(64)
+                browser_audio.clear()
+                shared.update(active=False, browser_uplink=0.0, browser_downlink=0.0,
+                              endpoint_sink=0.0, endpoint_capture=0.0)
+                await emit("CONNECTING", f"RECOVERY_PAUSE_{recovery['challenge']:016X}")
+
+                async def fence(event: asyncio.Event) -> None:
+                    deadline = loop.time() + 2
+                    while not event.is_set():
+                        if not valid() or not await authorize() or loop.time() >= deadline:
+                            raise MediaEnded("RECOVERY_TIMEOUT")
+                        for task in browser_tasks:
+                            if task.done():
+                                if task.exception():
+                                    raise task.exception()
+                                raise MediaEnded("MEDIA_ENDED")
+                        await asyncio.sleep(.01)
+                    if (not valid() or not await authorize() or not browser_clock.fresh(loop.time())
+                            or not shared["ready"] or loop.time() - shared["ready"] > no_progress):
+                        raise MediaEnded("RECOVERY_NOT_READY")
+
+                await fence(recovery["browser_marker"])
+                frame = browser_clock.ping(int(loop.time() * 1_000_000))
+                _, payload = decode_frame(frame)
+                recovery["server_nonce"] = PING.unpack(payload)[0]
+                await browser_put(frame)
+                await fence(recovery["server_marker"])
+                recovery["paused"] = False
+                recovery["binding"] = True
+                await emit("CONNECTING", f"RECOVERY_INPUT_{recovery['challenge']:016X}")
+                native_owner = 0
+                for _ in range(4):
+                    native_owner = secrets.randbits(64)
+                    if native_owner and native_owner not in recovery["native_owners"]:
+                        break
+                else:
+                    raise MediaEnded("RECOVERY_NOT_READY")
+                recovery["native_owners"].add(native_owner)
+                options["native_owner"] = native_owner
+                options["defer_eof_reopen"] = True
+                recovery["eof_reported"] = False
+
+                runner = lambda native_owner=native_owner: rebound_runner(native_owner)
+    except EndpointPeerEof:
+        if not recovery["eof_reported"]:
+            await emit("CONNECTING", "NATIVE_EOF_HEADER_0")
+        reason = "ENDPOINT_CLOSED"
+    except EndpointFrameTruncated as err:
+        await emit("CONNECTING", f"NATIVE_EOF_{err.phase}_{err.partial}")
+        await emit("CONNECTING", "RECOVERY_REFUSED_TRUNCATED")
+        reason = "FRAME_TRUNCATED"
     except (EndpointEnded, MediaEnded) as err:
         candidate = err.args[0] if err.args else "ENDPOINT_ERROR"
         reason = candidate if isinstance(candidate, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", candidate) else "ENDPOINT_ERROR"
@@ -647,8 +862,13 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
     finally:
         stop.set()
         browser_audio.clear()
+        for task in browser_tasks:
+            task.cancel()
+        await asyncio.gather(*browser_tasks, return_exceptions=True)
         if reason not in ("ENDED", "SOCKET_CLOSED", "OWNER_REVOKED"):
             _LOGGER.warning("Real endpoint call failed: %s", reason)
+        if recovery["in_progress"]:
+            await emit("CONNECTING", "RECOVERY_EXHAUSTED")
         # Publish the bounded reason before closing. The same safe enum in the
         # close frame survives races between the control and media sockets.
         try:
@@ -660,6 +880,14 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                 force_close = getattr(ws, "force_close", None)
                 if force_close:
                     force_close()
+        if (endpoint_pool is not None and config.endpoint_profile == 4 and not endpoint_pool.closed
+                and endpoint_pool.configurations.get(str(config.expected_uuid)) == config):
+            # Restore the idle pool after a deferred EOF, including refusal or
+            # a legacy caller that did not acknowledge the recovery fence.
+            try:
+                await asyncio.wait_for(endpoint_pool.open(str(config.expected_uuid), config), 6)
+            except (EndpointEnded, OSError, TimeoutError):
+                pass
 
 
 async def run_media(ws, owner, mode, authorize, on_state, is_current,

@@ -47,6 +47,21 @@ class EndpointEnded(Exception):
     """Fail-closed endpoint session termination."""
 
 
+class EndpointPeerEof(EndpointEnded):
+    """Peer closed at a frame boundary; partial frames are never recoverable."""
+
+    def __init__(self) -> None:
+        super().__init__("ENDPOINT_CLOSED")
+
+
+class EndpointFrameTruncated(EndpointEnded):
+    """Non-boundary EOF; retain only framing phase and byte count."""
+
+    def __init__(self, phase: str, partial: int) -> None:
+        super().__init__("FRAME_TRUNCATED")
+        self.phase, self.partial = phase, partial
+
+
 class EndpointClockInvalid(EndpointEnded):
     def __init__(self, branch: str) -> None:
         super().__init__("CLOCK_INVALID")
@@ -288,11 +303,19 @@ class EndpointClient:
             magic, expected_profile, 0, device, boot, connection, 1))
 
     async def _read_raw(self) -> tuple[int, bytes]:
-        header = await self.reader.readexactly(HEADER.size)
+        try:
+            header = await self.reader.readexactly(HEADER.size)
+        except asyncio.IncompleteReadError as err:
+            if not err.partial:
+                raise EndpointPeerEof() from err
+            raise EndpointFrameTruncated("HEADER", len(err.partial)) from err
         kind, size = HEADER.unpack(header)
         if not 0 < size <= MAX_BODY:
             raise EndpointEnded("FRAME_INVALID")
-        return kind, await self.reader.readexactly(size)
+        try:
+            return kind, await self.reader.readexactly(size)
+        except asyncio.IncompleteReadError as err:
+            raise EndpointFrameTruncated("BODY", len(err.partial)) from err
 
     async def _write_raw(self, kind: int, body: bytes) -> None:
         self.writer.write(HEADER.pack(kind, len(body)) + body)
@@ -394,6 +417,8 @@ class EndpointClient:
                 if not self.answered or self.held:
                     await asyncio.sleep(.01)
                     continue
+                if not self.audio:
+                    continue  # A mode transition can clear it after wakeup.
                 generated, prior, pcm = self.audio.popleft()
                 now = asyncio.get_running_loop().time()
                 now_us = int(now * 1_000_000)
@@ -405,6 +430,14 @@ class EndpointClient:
                 tail = AUDIO.pack(self.mode_generation, self.tx_media_sequence, now_us, inherited, SAMPLES) + pcm
                 self.tx_media_sequence += 1
                 kind, body = 1, self._envelope() + tail
+            if kind == 2 and getattr(self, "recovery_admission", False):
+                if self.renewal_authorize is None or not await self.renewal_authorize():
+                    raise EndpointEnded("AUTH_REVOKED")
+                now = asyncio.get_running_loop().time()
+                if (self.closed or self.ending or not self.clock.fresh(now)
+                        or not self.last_status_received or now - self.last_status_received > 1.5
+                        or self.status_health & 0xe0):
+                    raise EndpointEnded("RECOVERY_NOT_READY")
             if kind == 14:
                 if self.renewal_authorize is None or not await self.renewal_authorize():
                     raise EndpointEnded("AUTH_REVOKED")
@@ -1047,7 +1080,7 @@ class EndpointPool:
                          mode_generation: int, level: int, maximum: int, chime: int,
                          revision: int) -> dict:
         entry = self.entries.get(room_id)
-        if (not entry or entry[0].closed or (entry[0].call, entry[0].owner,
+        if (not entry or entry[0].closed or (entry[0].call, getattr(entry[0], "ha_owner", entry[0].owner),
                 entry[0].mode_generation) != (call_id, owner_generation, mode_generation)):
             raise EndpointEnded("STALE_CALL")
         return await entry[0].set_volume(level, maximum, chime, revision)
@@ -1055,7 +1088,7 @@ class EndpointPool:
     async def _command(self, room_id: str, call: bytes, owner: int,
                        generation: int, decline: bool) -> None:
         entry = self.entries.get(room_id)
-        if (not entry or entry[0].closed or (entry[0].call, entry[0].owner,
+        if (not entry or entry[0].closed or (entry[0].call, getattr(entry[0], "ha_owner", entry[0].owner),
                 entry[0].mode_generation) != (call, owner, generation)):
             raise EndpointEnded("STALE_CALL")
         await (entry[0].decline() if decline else entry[0].answer())
@@ -1074,18 +1107,31 @@ class EndpointPool:
 
     async def run(self, config: EndpointConfig, call: bytes, owner: int, mode: str,
                   generation: int, bridge: Callable[[EndpointClient], Awaitable[None]],
-                  authorize: Callable[[], Awaitable[bool]], answer_policy: str) -> None:
+                  authorize: Callable[[], Awaitable[bool]], answer_policy: str,
+                  native_owner: int | None = None, defer_eof_reopen: bool = False) -> None:
         room = str(config.expected_uuid)
         async with self.locks.setdefault(room, asyncio.Lock()):
             client = await self._open(room, config)
             tasks = self.entries[room][1]
-            client.bind(call, owner, mode, generation, authorize, answer_policy)
+            client.bind(call, native_owner if native_owner is not None else owner,
+                        mode, generation, authorize, answer_policy)
+            client.ha_owner = owner
+            client.recovery_admission = native_owner is not None
             worker = asyncio.create_task(bridge(client))
+            peer_eof = False
             try:
                 done, _ = await asyncio.wait([*tasks, worker], return_when=asyncio.FIRST_COMPLETED)
-                for task in done:
-                    if not task.cancelled() and task.exception():
-                        raise task.exception()
+                # The pool watcher may finish after consuming transport errors.
+                # Inspect every completed task, and never hide a simultaneous
+                # protocol, clock, authorization, or bridge failure behind EOF.
+                errors = [task.exception() for task in [*tasks, worker]
+                          if task.done() and not task.cancelled() and task.exception()]
+                for error in errors:
+                    if not isinstance(error, EndpointPeerEof):
+                        raise error
+                if errors:
+                    peer_eof = True
+                    raise errors[0]
                 if worker not in done:
                     raise EndpointEnded("ENDPOINT_CLOSED")
             finally:
@@ -1094,7 +1140,7 @@ class EndpointPool:
                 if self.entries.get(room, (None,))[0] is client:
                     self.entries.pop(room, None)
                 await _stop_transport(client, tasks)
-                if not self.closed and self.configurations.get(room) == config:
+                if not (peer_eof and defer_eof_reopen) and not self.closed and self.configurations.get(room) == config:
                     try:
                         await self._open(room, config)
                     except (EndpointEnded, OSError, TimeoutError) as err:
@@ -1107,7 +1153,8 @@ async def run_endpoint(config: EndpointConfig, call_id: bytes, owner_generation:
                        bridge: Callable[[EndpointClient], Awaitable[None]],
                        renewal_authorize: Callable[[], Awaitable[bool]], *,
                        pool: EndpointPool | None = None, answer_policy: str = "drop_in",
-                       volume_config: dict | None = None) -> None:
+                       volume_config: dict | None = None, native_owner: int | None = None,
+                       defer_eof_reopen: bool = False) -> None:
     """Connect, run one bound call, and guarantee terminal cleanup."""
     if answer_policy not in ("drop_in", "ring"):
         raise EndpointEnded("ANSWER_POLICY_UNSUPPORTED")
@@ -1123,7 +1170,7 @@ async def run_endpoint(config: EndpointConfig, call_id: bytes, owner_generation:
         bridge = configured_bridge
     if pool is not None and config.endpoint_profile == 4:
         await pool.run(config, call_id, owner_generation, mode, mode_generation,
-                       bridge, renewal_authorize, answer_policy)
+                       bridge, renewal_authorize, answer_policy, native_owner, defer_eof_reopen)
         return
     client = EndpointClient(config, call_id, owner_generation, mode, mode_generation,
                             renewal_authorize)
