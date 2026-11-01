@@ -479,6 +479,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
             uplink_wait_started = 0.0
             unmute_edges = endpoint.unmute_edges
             previous_muted = None
+            previous_mode = None
             unmute_pending = None
             last_mode = None
             await emit("CONNECTING", "REAL_ENDPOINT")
@@ -528,10 +529,13 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
                     endpoint.upgrade_result = None
                     await emit("ACTIVE_SPEAKER_ONLY" if shared["active"] else "CONNECTING",
                                "UPGRADE_FAILED")
-                if previous_muted != endpoint.room_mic_muted:
-                    previous_muted = endpoint.room_mic_muted
-                    if shared["active"] and endpoint.mode == "speaker_only":
-                        await emit("ACTIVE_SPEAKER_ONLY", "MUTE_CHANGED")
+                mute_changed = previous_muted != endpoint.room_mic_muted
+                mode_changed = previous_mode != endpoint.mode
+                if mute_changed or mode_changed:
+                    previous_muted, previous_mode = endpoint.room_mic_muted, endpoint.mode
+                    if endpoint.mode == "speaker_only":
+                        await emit("ACTIVE_SPEAKER_ONLY" if shared["active"] else "CONNECTING",
+                                   "MUTE_CHANGED" if mute_changed else "MODE_CHANGED")
                 required = [shared["ready"], shared["endpoint_sink"]]
                 if endpoint.mode == "full_duplex":
                     required.extend((shared["browser_downlink"], shared["endpoint_capture"]))

@@ -832,6 +832,28 @@ async def ws_start(hass, connection, msg) -> None:
     )
 
 
+def _browser_watchdog_snapshot(value):
+    """Accept only bounded, owner-reported terminal watchdog metadata."""
+    fields = {"frontendBuild", "captureStalled", "outputStalled", "contextRunning",
+              "captureAgeMs", "outputAgeMs", "contextState", "backendState",
+              "callMode", "lastActiveMode", "roomMuted", "expectRoomPlayback"}
+    if type(value) is not dict or set(value) != fields or value["frontendBuild"] != "0.4.8":
+        return None
+    if any(type(value[k]) is not bool for k in ("captureStalled", "outputStalled",
+                                                  "contextRunning", "expectRoomPlayback")):
+        return None
+    if any(value[k] is not None and (type(value[k]) is not int or not 0 <= value[k] <= 60000
+                                      or value[k] % 100) for k in ("captureAgeMs", "outputAgeMs")):
+        return None
+    if (value["contextState"] not in ("running", "suspended", "interrupted", "closed", "unknown")
+            or value["backendState"] not in ("PREPARING", "CONNECTING", "ACTIVE_FULL", "ACTIVE_SPEAKER_ONLY", "other")
+            or value["callMode"] not in ("speaker_only", "full_duplex")
+            or value["lastActiveMode"] not in ("speaker_only", "full_duplex", "unknown")
+            or (value["roomMuted"] is not None and type(value["roomMuted"]) is not bool)):
+        return None
+    return dict(value)
+
+
 OWNER_SCHEMA = {
     probatio.Required("call_id"): str,
     probatio.Required("owner_generation"): str,
@@ -839,7 +861,8 @@ OWNER_SCHEMA = {
 
 
 @websocket_api.websocket_command(
-    {probatio.Required("type"): "intercom_native/stop", **OWNER_SCHEMA}
+    {probatio.Required("type"): "intercom_native/stop", **OWNER_SCHEMA,
+     probatio.Optional("watchdog"): dict}
 )
 @websocket_api.async_response
 async def ws_stop(hass, connection, msg) -> None:
@@ -857,6 +880,10 @@ async def ws_stop(hass, connection, msg) -> None:
             teardown_complete = await runtime.revoke("OWNER_STOPPED")
         if not teardown_complete:
             raise Refused("TEARDOWN_TIMEOUT")
+        snapshot = _browser_watchdog_snapshot(msg.get("watchdog"))
+        if (snapshot is not None and runtime.session.owner is None
+                and runtime.terminal_owner == (principal, call_id, generation)):
+            runtime.last_metrics["browser_watchdog"] = snapshot
     except Refused as err:
         _send_error(connection, msg, str(err))
         return

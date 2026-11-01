@@ -91,7 +91,7 @@ class IntercomM3PocPanel extends HTMLElement {
     this.onPageHide = () => this.cleanup("PAGE_HIDDEN", true);
     this.onVisibility = () => { if (document.visibilityState !== "visible") this.cleanup("PAGE_HIDDEN", true); };
   }
-  emptyMetrics() { return { pocVersion: this.panelConfig?.version || "0.4.7", callerInput:"unknown", callMode:this.callMode||"full_duplex", admissionAvailable:null, admissionBusy:null, simulation: this.panelConfig?.simulation!==false, endpointBackend:this.panelConfig?.backend||"simulation", path: "unknown", audioAgeLimitUs: 2000000, captureFrames: 0, capturePeak: 0, nonzeroCaptureFrames: 0, renderedFrames: 0, txDrops: 0, rxDrops: 0, staleDrops: 0, clockStaleDrops: 0, browserClockRejectedSamples: 0, browserClockRejectedUncertaintyMaxUs: 0, admissionExpiredDrops: 0, mainQueueDrops: 0, workletQueueDrops: 0, workletDeadlineDrops: 0, receivedMediaAgeMaxUs: 0, workletQueueResidenceMaxUs: 0, clockUncertaintyUs: 0, outputLeadUs: 0, baseLatencyUs: 0, outputLatencyUs: 0, clockFresh: false, backend: "IDLE", server: {}, physicalIoLatency: "unproven", acousticLatency: "unproven", outputRoute: "unknown" }; }
+  emptyMetrics() { return { pocVersion: this.panelConfig?.version || "0.4.8", frontendBuild:"0.4.8", callerInput:"unknown", callMode:this.callMode||"full_duplex", admissionAvailable:null, admissionBusy:null, simulation: this.panelConfig?.simulation!==false, endpointBackend:this.panelConfig?.backend||"simulation", path: "unknown", audioAgeLimitUs: 2000000, captureFrames: 0, capturePeak: 0, nonzeroCaptureFrames: 0, renderedFrames: 0, txDrops: 0, rxDrops: 0, staleDrops: 0, clockStaleDrops: 0, browserClockRejectedSamples: 0, browserClockRejectedUncertaintyMaxUs: 0, admissionExpiredDrops: 0, mainQueueDrops: 0, workletQueueDrops: 0, workletDeadlineDrops: 0, receivedMediaAgeMaxUs: 0, workletQueueResidenceMaxUs: 0, clockUncertaintyUs: 0, outputLeadUs: 0, baseLatencyUs: 0, outputLatencyUs: 0, clockFresh: false, backend: "IDLE", server: {}, physicalIoLatency: "unproven", acousticLatency: "unproven", outputRoute: "unknown" }; }
   setConfig(config) { if(this.callId||this.inflight||this.cleaning){this.pendingConfig={...this.pendingConfig,...config};return;} const previousDeviceId=this.panelConfig.device_id; this.panelConfig={...this.panelConfig,...config}; this.metrics=this.emptyMetrics(); if(config?.device_id&&config.device_id!==previousDeviceId)this.selectedDeviceId=String(config.device_id); this.render(); }
   set panel(value) { if (!this.callId && !this.inflight) this.setConfig(value?.config || {}); }
   set hass(value) { const previous=this._hass?.connection,next=value?.connection;if(previous!==next){this.roomRequest=Symbol();if(previous)this.rooms=[];this.roomLoad="unknown";if(previous&&this.roomControlLost)previous.removeEventListener?.("disconnected",this.roomControlLost);this.roomControlLost=()=>{this.roomRequest=Symbol();this.rooms=[];this.roomLoad="failed";this.render();};next?.addEventListener?.("disconnected",this.roomControlLost);}this._hass=value;this.render();if(previous!==next&&this.isConnected)this.refreshRooms(); }
@@ -147,7 +147,7 @@ class IntercomM3PocPanel extends HTMLElement {
         this.permissionPromise=null; this.permissionPending=false; this.stream = stream; this.stream.getTracks().forEach(track => track.addEventListener("ended", () => this.cleanup("Microphone stopped.", true), { once: true }));
       }
       if (document.visibilityState !== "visible") throw new Error("PAGE_HIDDEN");
-      await bounded(this.ctx.audioWorklet.addModule("/intercom_m3_poc/worklet.js?v=0.4.7"), 5000, "WORKLET_LOAD_TIMEOUT"); this.assertAttempt(attempt);
+      await bounded(this.ctx.audioWorklet.addModule("/intercom_m3_poc/worklet.js?v=0.4.8"), 5000, "WORKLET_LOAD_TIMEOUT"); this.assertAttempt(attempt);
       if (this.ctx.sampleRate < 16000) throw new Error("CAPTURE_RATE_UNSUPPORTED");
       this.node = new AudioWorkletNode(this.ctx, "intercom-m3-poc", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
       this.node.addEventListener("processorerror", () => this.cleanup("Audio processing failed.", true), { once: true });
@@ -177,6 +177,7 @@ class IntercomM3PocPanel extends HTMLElement {
       else if(event.reason==="UPGRADE_PENDING")this.resumeMessage="Resuming the room microphone; the room will indicate before capture resumes.";
       else if(event.reason==="UPGRADE_FAILED")this.resumeMessage="Room microphone could not resume. Transmission is unconfirmed.";
       this.metrics.backend = event.state || "UNKNOWN";
+      if(event.state==="CONNECTING"&&event.mode==="speaker_only")this.lastActiveMode="speaker_only";
       this.metrics.server = safeServerMetrics(event.metrics);
       if (event.state === "TERMINATED") this.cleanup(`Call ended: ${event.reason || "TERMINATED"}`, false);
       else this.updateConnected();
@@ -261,7 +262,13 @@ class IntercomM3PocPanel extends HTMLElement {
     const expectRoomPlayback=this.mediaWasActive&&!explicitOneWay&&!roomMuted&&this.lastActiveMode==="full_duplex";
     const outputStamp=expectRoomPlayback?Math.max(this.lastPlayed||0,this.fullModeStarted||0):this.lastOutputProgress;
     const captureStalled=elapsed>2000&&now-(this.lastCapture||this.mediaStarted)>2000,outputStalled=elapsed>2000&&now-(outputStamp||this.mediaStarted)>2000;
-    if(this.inflight&&(captureStalled||outputStalled||this.ctx?.state!=="running")&&elapsed>2000){this.cleanup("Media progress stopped.",true);return;}
+    if(this.inflight&&(captureStalled||outputStalled||this.ctx?.state!=="running")&&elapsed>2000){
+      const age=stamp=>stamp>0?Math.min(60000,Math.max(0,Math.round((now-stamp)/100)*100)):null;
+      const context=["running","suspended","interrupted","closed"].includes(this.ctx?.state)?this.ctx.state:"unknown";
+      const backendState=["PREPARING","CONNECTING","ACTIVE_FULL","ACTIVE_SPEAKER_ONLY"].includes(this.metrics.backend)?this.metrics.backend:"other";
+      this.metrics.watchdog={frontendBuild:"0.4.8",captureStalled,outputStalled,contextRunning:context==="running",captureAgeMs:age(this.lastCapture||this.mediaStarted),outputAgeMs:age(outputStamp||this.mediaStarted),contextState:context,backendState,callMode:explicitOneWay?"speaker_only":"full_duplex",lastActiveMode:["speaker_only","full_duplex"].includes(this.lastActiveMode)?this.lastActiveMode:"unknown",roomMuted:typeof this.metrics.server?.room_mic_muted==="boolean"?this.metrics.server.room_mic_muted:null,expectRoomPlayback};
+      this.cleanup("Media progress stopped.",true);return;
+    }
     if(this.inflight&&!this.mediaWasActive&&elapsed>10000){this.cleanup("Media setup timed out.",true);return;}
     const output=this.outputReady();
     if(this.outputAudio&&!output&&now-this.outputSwitchStarted>2000){this.cleanup("Speaker output stopped.",true);return;}
@@ -319,9 +326,9 @@ class IntercomM3PocPanel extends HTMLElement {
     const outputAudio=this.outputAudio, outputBridge=this.outputBridge;this.outputAudio=null;this.outputBridge=null;this.outputDevices=[];this.routingPending=false;
     if(outputAudio){try{outputAudio.pause();outputAudio.srcObject=null;outputAudio.remove();}catch{}}
     outputBridge?.stream.getTracks().forEach(track=>track.stop());
-    this.retryOffered=/^(?:Call|Media) ended: (?:CLOCK_(?:INVALID|STALE|UNTRUSTED)|ENDPOINT_(?:CLOSED|IO_ERROR|TLS_ERROR|END_(?:9|10|11))|MEDIA_TIMEOUT|UPGRADE_TIMEOUT)$/.test(reason||"");
+    this.retryOffered=reason==="Media progress stopped."||/^(?:Call|Media) ended: (?:CLOCK_(?:INVALID|STALE|UNTRUSTED)|ENDPOINT_(?:CLOSED|IO_ERROR|TLS_ERROR|END_(?:9|10|11))|MEDIA_TIMEOUT|UPGRADE_TIMEOUT)$/.test(reason||"");
     this.status=(this.retryOffered?"Audio was interrupted and the call ended. Select RETRY CALL to start a new call.":reason||"Call ended")+(awaitingPermission?" Dismiss the browser microphone prompt before starting another call.":""); this.metrics.backend="TERMINATED"; this.render();
-    this.cleanupPromise=(async()=>{ if(ctx)await bounded(ctx.close(),3000,"AUDIO_CLOSE_TIMEOUT").catch(()=>{}); if(tellServer&&callId&&this._hass?.connection)await bounded(this._hass.connection.sendMessagePromise({type:"intercom_native/stop",call_id:callId,owner_generation:ownerGeneration}),3000,"STOP_TIMEOUT").catch(()=>{}); this.cleaning=false; if(this.pendingConfig){const config=this.pendingConfig;this.pendingConfig=null;this.setConfig(config);}else this.render(); })();
+    this.cleanupPromise=(async()=>{ if(ctx)await bounded(ctx.close(),3000,"AUDIO_CLOSE_TIMEOUT").catch(()=>{}); if(tellServer&&callId&&this._hass?.connection)await bounded(this._hass.connection.sendMessagePromise({type:"intercom_native/stop",call_id:callId,owner_generation:ownerGeneration,...(reason==="Media progress stopped."&&this.metrics.watchdog?{watchdog:this.metrics.watchdog}:{})}),3000,"STOP_TIMEOUT").catch(()=>{}); this.cleaning=false; if(this.pendingConfig){const config=this.pendingConfig;this.pendingConfig=null;this.setConfig(config);}else this.render(); })();
     return this.cleanupPromise;
   }
   async inspectOutputs() {
