@@ -2,9 +2,9 @@
 
 Home Assistant integration with a sidebar for room enrollment, permissions, calls, announcements, history and diagnostics.
 
-**Development alpha 0.4.5 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This candidate is prepared for HACS custom-repository installation; 0.4.5 live acceptance remains pending.
+**Development alpha 0.4.6 · Apache-2.0.** Repository: [chstech1/ha-intercom-manager](https://github.com/chstech1/ha-intercom-manager). This candidate is prepared for HACS custom-repository installation; 0.4.6 live acceptance remains pending.
 
-Version 0.4.5 extends private enrollment lifetime and retains committed startup authority for the matching installation. Version 0.4.4 adds room selection and automatic unmute recovery. Clock failure analysis and physical acceptance remain open. Version 0.4.3 adds descriptions for the existing Home Assistant actions. Version 0.4.2 added standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and kept all eight firmware files unchanged in 0.4.2. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
+Version 0.4.6 addresses pending-indication speaker progress and browser playback watchdog transitions; physical verification remains pending. Version 0.4.5 extends private enrollment lifetime and retains committed startup authority for the matching installation. Version 0.4.4 adds room selection and automatic unmute recovery. Clock failure analysis and physical acceptance remain open. Version 0.4.3 adds descriptions for the existing Home Assistant actions. Version 0.4.2 added standard subject and issuer key identifiers to newly issued enrollment certificates for strict TLS verification. It retains 0.4.1's nonce validation without jq regex support and kept all eight firmware files unchanged in 0.4.2. Existing identities require reviewed fresh paired enrollment; corrected end-to-end acceptance remains open.
 
 ## Alpha requirements and limits
 

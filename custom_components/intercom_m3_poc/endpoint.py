@@ -562,7 +562,11 @@ class EndpointClient:
                     self.status = state
                     self.status_health = health
                     self.status_rx_sequence, self.status_tx_sequence = rx_sequence, tx_sequence
-                    required_health = 31 if self.mode == "full_duplex" else 13
+                    # During a pending upgrade, the previous speaker output is
+                    # still usable while the new LED/chime indication completes.
+                    # This grants only speaker progress, never microphone TX.
+                    pending_indication = state == 5 and self.upgrade_generation == mode_generation
+                    required_health = 1 if pending_indication else 31 if self.mode == "full_duplex" else 13
                     self.last_sink = 0.0
                     if output_age_ms == UNKNOWN_PROGRESS_MS:
                         continue
@@ -570,6 +574,7 @@ class EndpointClient:
                     tx_age_us = tx_age_ms * 1_000 + transit_us
                     output_age_us = output_age_ms * 1_000 + transit_us
                     if ((health & required_health) == required_health
+                            and (not pending_indication or not health & 0xe0)
                             and rx_age_us <= 500_000 and output_age_us <= 500_000
                             and (self.mode != "full_duplex" or tx_age_us <= 500_000)):
                         self.last_sink = now - output_age_us / 1_000_000
