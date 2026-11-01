@@ -47,6 +47,12 @@ class EndpointEnded(Exception):
     """Fail-closed endpoint session termination."""
 
 
+class EndpointClockInvalid(EndpointEnded):
+    def __init__(self, branch: str) -> None:
+        super().__init__("CLOCK_INVALID")
+        self.clock_branch = branch
+
+
 @dataclass(frozen=True)
 class EndpointConfig:
     host: str
@@ -96,11 +102,13 @@ class ClockRelation:
         self.rejected_uncertainty_max_ms = 0
 
     def pong(self, nonce: int, t1: int, t2: int, t3: int, now_us: int, now: float) -> None:
-        if self.pending.pop(nonce, None) != t1 or t3 < t2 or now_us < t1 or t2 < self.last_peer_us:
-            raise EndpointEnded("CLOCK_INVALID")
+        if self.pending.pop(nonce, None) != t1:
+            raise EndpointClockInvalid("endpoint_pong_match")
+        if t3 < t2 or now_us < t1 or t2 < self.last_peer_us:
+            raise EndpointClockInvalid("endpoint_pong_order")
         rtt = (now_us - t1) - (t3 - t2)
         if rtt < 0:
-            raise EndpointEnded("CLOCK_INVALID")
+            raise EndpointClockInvalid("endpoint_pong_rtt")
         resolution = max(1, int(time.get_clock_info("monotonic").resolution * 1_000_000))
         offset = ((t2 - t1) + (t3 - now_us)) / 2
         uncertainty = max(rtt / 2, resolution) + int((rtt + 3_000_000) * .0002) + resolution
@@ -122,7 +130,7 @@ class ClockRelation:
         if not self.fresh(now):
             raise EndpointEnded("CLOCK_STALE")
         if generated_local_us - now_us > self.uncertainty_us:
-            raise EndpointEnded("CLOCK_INVALID")
+            raise EndpointClockInvalid("endpoint_local_future")
         return max(0, now_us - generated_local_us) + int(self.uncertainty_us)
 
     def local_generated(self, endpoint_us: int, prior_us: int, now_us: int, now: float) -> tuple[int, int]:
@@ -130,7 +138,7 @@ class ClockRelation:
             raise EndpointEnded("CLOCK_STALE")
         local_us = int(endpoint_us - self.offset_us)
         if local_us - now_us > self.uncertainty_us:
-            raise EndpointEnded("CLOCK_INVALID")
+            raise EndpointClockInvalid("endpoint_peer_future")
         upper = max(0, now_us - local_us) + prior_us + int(self.uncertainty_us)
         if upper >= CLOCK_MEDIA_EXPIRY_US:
             raise EndpointEnded("AUDIO_EXPIRED")
@@ -850,12 +858,12 @@ class EndpointClient:
         now_us = int(now * 1_000_000)
         if kind == 4:
             if len(tail) != PING.size:
-                raise EndpointEnded("CLOCK_INVALID")
+                raise EndpointClockInvalid("endpoint_ping_size")
             nonce, t1 = PING.unpack(tail)
             await self.send_control(5, PONG.pack(nonce, t1, now_us, int(asyncio.get_running_loop().time() * 1_000_000)), idle=idle)
         else:
             if len(tail) != PONG.size:
-                raise EndpointEnded("CLOCK_INVALID")
+                raise EndpointClockInvalid("endpoint_pong_size")
             self.clock.pong(*PONG.unpack(tail), now_us, now)
 
     async def pinger_loop(self) -> None:
@@ -866,7 +874,9 @@ class EndpointClient:
                 raise EndpointEnded("CLOCK_STALE")
             if self.held and not self.hold_healthy(asyncio.get_running_loop().time()):
                 raise EndpointEnded("COMMAND_HEALTH_FAILED")
-            self.clock.pending = {nonce: now_us}
+            self.clock.pending[nonce] = now_us
+            while len(self.clock.pending) > 3:
+                self.clock.pending.pop(next(iter(self.clock.pending)))
             idle = not self.started
             if not idle:
                 if self.renewal_authorize is None:

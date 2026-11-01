@@ -54,6 +54,12 @@ class MediaEnded(Exception):
     pass
 
 
+class MediaClockInvalid(MediaEnded):
+    def __init__(self, branch: str) -> None:
+        super().__init__("CLOCK_INVALID")
+        self.clock_branch = branch
+
+
 class ClockRelation:
     def __init__(self) -> None:
         self.offset_us = 0.0       # peer monotonic - local monotonic
@@ -67,17 +73,20 @@ class ClockRelation:
 
     def ping(self, now_us: int) -> bytes:
         nonce = secrets.randbits(64)
-        self.pending = {nonce: now_us}
+        self.pending[nonce] = now_us
+        while len(self.pending) > 3:
+            self.pending.pop(next(iter(self.pending)))
         return encode_frame(5, PING.pack(nonce, now_us))
 
     def pong(self, payload: bytes, now_us: int, now: float) -> None:
         nonce, t1, t2, t3 = PONG.unpack(payload)
-        if (self.pending.pop(nonce, None) != t1 or t3 < t2 or now_us < t1
-                or t2 < self.last_clock_peer_us):
-            raise MediaEnded("CLOCK_INVALID")
+        if self.pending.pop(nonce, None) != t1:
+            raise MediaClockInvalid("browser_pong_match")
+        if t3 < t2 or now_us < t1 or t2 < self.last_clock_peer_us:
+            raise MediaClockInvalid("browser_pong_order")
         rtt = (now_us - t1) - (t3 - t2)
         if rtt < 0:
-            raise MediaEnded("CLOCK_INVALID")
+            raise MediaClockInvalid("browser_pong_rtt")
         offset = ((t2 - t1) + (t3 - now_us)) / 2
         resolution = max(1, int(time.get_clock_info("monotonic").resolution * 1_000_000))
         # Peer is browser performance.now(); include its conservative 1 ms quantum.
@@ -103,8 +112,10 @@ class ClockRelation:
         if not self.fresh(now):
             raise MediaEnded("CLOCK_STALE")
         local_sent = sent_us - self.offset_us
-        if sent_us < self.last_media_sent_us or local_sent - now_us > self.uncertainty_us:
-            raise MediaEnded("CLOCK_INVALID")
+        if sent_us < self.last_media_sent_us:
+            raise MediaClockInvalid("browser_audio_regression")
+        if local_sent - now_us > self.uncertainty_us:
+            raise MediaClockInvalid("browser_audio_future")
         self.last_media_sent_us = sent_us
         return max(0, int(now_us - local_sent)) + prior_us + int(self.uncertainty_us)
 
@@ -307,6 +318,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
     """Bridge browser PCM to one authenticated endpoint without rejuvenating age."""
     loop = asyncio.get_running_loop()
     browser_clock = ClockRelation()
+    endpoint_context = [None]
     browser_control: asyncio.Queue[bytes] = asyncio.Queue(maxsize=16)
     browser_audio: deque[tuple[int, int, bytes, int]] = deque(maxlen=3)
     browser_audio_ready = asyncio.Event()
@@ -338,6 +350,7 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
             raise MediaEnded("CONTROL_BLOCKED") from None
 
     async def bridge(endpoint: EndpointClient) -> None:
+        endpoint_context[0] = endpoint
         def mode_changed() -> None:
             browser_audio.clear()
             shared["endpoint_capture"] = shared["browser_downlink"] = 0.0
@@ -602,6 +615,23 @@ async def _run_real_media(ws, owner, mode, authorize, on_state, is_current,
     except (EndpointEnded, MediaEnded) as err:
         candidate = err.args[0] if err.args else "ENDPOINT_ERROR"
         reason = candidate if isinstance(candidate, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", candidate) else "ENDPOINT_ERROR"
+        if reason in ("CLOCK_INVALID", "CLOCK_STALE", "CLOCK_UNTRUSTED"):
+            branch = getattr(err, "clock_branch", "unspecified")
+            if not isinstance(branch, str) or not re.fullmatch(r"[a-z_]{1,40}", branch):
+                branch = "unspecified"
+            peer = endpoint_context[0]
+            clock = getattr(peer, "clock", None)
+            now = loop.time()
+            def age_ms(relation):
+                updated = getattr(relation, "updated", 0)
+                return max(0, int((now - updated) * 1000)) if updated else -1
+            def uncertainty_ms(relation):
+                value = getattr(relation, "uncertainty_us", float("inf"))
+                return max(0, int(value // 1000)) if math.isfinite(value) else -1
+            _LOGGER.warning("Clock failure: reason=%s branch=%s browser_age_ms=%s browser_uncertainty_ms=%s endpoint_age_ms=%s endpoint_uncertainty_ms=%s mode=%s generation=%s upgrade_pending=%s",
+                            reason, branch, age_ms(browser_clock), uncertainty_ms(browser_clock),
+                            age_ms(clock), uncertainty_ms(clock), getattr(peer, "mode", "unknown"),
+                            getattr(peer, "mode_generation", -1), getattr(peer, "upgrade_generation", None) is not None)
     except asyncio.IncompleteReadError:
         reason = "ENDPOINT_CLOSED"
     except ssl.SSLError:
