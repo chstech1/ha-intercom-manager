@@ -267,7 +267,7 @@ subscribe_manager = websocket_api.websocket_command({probatio.Required("type"): 
 REV = {probatio.Required("expected_revision"): int}
 DEPLOY_REV = {probatio.Required("expected_deployment_revision"): int,
               probatio.Required("device_id"): str}
-DEPLOY_ACTION = probatio.In(("install", "rollback_previous", "restore_stock", "remove"))
+DEPLOY_ACTION = probatio.In(("adopt", "install", "rollback_previous", "restore_stock", "remove"))
 CALL = {probatio.Required("call_id"): str}
 COMMANDS = (
     command("list_rooms", {}, list_rooms), subscribe_manager,

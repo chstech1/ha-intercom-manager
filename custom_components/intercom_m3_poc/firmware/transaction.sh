@@ -8,7 +8,7 @@ ROOT=''
 FIXTURE=0
 if [ -n "${INTERCOM_FIXTURE_ROOT:-}" ]; then
     ROOT=$(readlink -f "$INTERCOM_FIXTURE_ROOT")
-    case "$ROOT" in /tmp/intercom-permanent-fixture.*) :;; *) exit 78;; esac
+    case "$ROOT" in /tmp/intercom-permanent-fixture.*|/private/tmp/intercom-permanent-fixture.*) :;; *) exit 78;; esac
     [ -d "$ROOT" ] && [ ! -L "$INTERCOM_FIXTURE_ROOT" ] &&
         [ "$(cat "$ROOT/.intercom-fixture" 2>/dev/null)" = offline-paired-fixture-v1 ] || exit 78
     FIXTURE=1
@@ -161,14 +161,14 @@ runtime_admit() {
         number=$(runtime_get "$key"); case "$number" in ''|*[!0-9]*|0) die invalid_runtime_pid;; esac
     done
     for key in application_pid application_start_ticks; do
-        number=$(runtime_get "$key"); case "$number" in ''|*[!0-9]*) die invalid_runtime_pid;; 0) [ "$ACTION" = activate_boot ] || die stopped_voice_not_admitted;; esac
+        number=$(runtime_get "$key"); case "$number" in ''|*[!0-9]*) die invalid_runtime_pid;; 0) { [ "$ACTION" = activate_boot ] || [ "$ACTION" = adopt ]; } || die stopped_voice_not_admitted;; esac
     done
     for key in monitor_cmdline_sha256 monitor_exe_sha256 application_sha256 pulse_sha256; do hex "$(runtime_get "$key")" 64 || die invalid_runtime_hash; done
     pid=$(runtime_get application_pid)
     regular "$ROOT/var/run/thirdreality/ha-speaker.pid" &&
         [ "$(cat "$ROOT/var/run/thirdreality/ha-speaker.pid")" = "$(runtime_get monitor_pid)" ] || die monitor_pidfile_mismatch
     if [ "$pid" = 0 ]; then
-        [ "$ACTION" = activate_boot ] && [ "$(runtime_get application_start_ticks)" = 0 ] &&
+        { [ "$ACTION" = activate_boot ] || [ "$ACTION" = adopt ]; } && [ "$(runtime_get application_start_ticks)" = 0 ] &&
             regular "$STATE/current.ref" && regular "$HELPER" || die stopped_voice_not_admitted
         [ -z "$(pidof linux-voice-assistant-cpp 2>/dev/null || true)" ] || die unexpected_voice_process
         [ "$(runtime_get application_sha256)" = "$(sha "$APP")" ] || die stopped_voice_hash_mismatch
@@ -367,7 +367,7 @@ recover_pending() {
     done
     if [ "$ACTION" != boot-reconcile ]; then quiesce; fi
     apply_snapshot "$pending"
-    if [ "$ACTION" != boot-reconcile ]; then
+    if [ "$ACTION" != boot-reconcile ] && [ "$ACTION" != adopt ]; then
         if regular "$HELPER" && { [ "$FIXTURE" != 1 ] || [ "${INTERCOM_PROCESS_FIXTURE:-0}" = 1 ]; }; then
             # A failed launch may already have consumed the candidate ticket.
             # HA may pre-enroll one separate, short-lived ticket for the exact
@@ -390,16 +390,22 @@ cleanup() {
     if [ "$LOCKED" = 1 ]; then rm -f "$STATE/lock/owner"; rmdir "$STATE/lock" 2>/dev/null || true; fi
     exit "$result"
 }
-case "$ACTION" in preflight|install|verify|rollback_previous|restore_stock|remove|reconcile|boot-reconcile|activate_boot) :;; *) die invalid_action;; esac
+case "$ACTION" in preflight|adopt|install|verify|rollback_previous|restore_stock|remove|reconcile|boot-reconcile|activate_boot) :;; *) die invalid_action;; esac
 [ "$#" = 1 ] || die invalid_arguments
 if [ "$FIXTURE" != 1 ]; then
     [ "$(id -u)" = 0 ] || die root_required
     if [ "$ACTION" = boot-reconcile ]; then
         regular "$STATE/engine.sh" && [ "$(sha "$STATE/engine.sh")" = "$(sha "$0")" ] || die uninstalled_boot_engine
     fi
+    # Adoption is a separately reviewed identity transfer, not physical acceptance.
+    ADOPT_AUTH=0
+    if regular "$STAGE/operation.json" && jq -e --arg action "$ACTION" '.adoption_authorized==true and .action==$action and (.action=="adopt" or .action=="activate_boot")' "$STAGE/operation.json" >/dev/null; then
+        ADOPT_AUTH=1
+    fi
+    [ "$ACTION" != adopt ] || [ "$ADOPT_AUTH" = 1 ] || die adoption_not_authorized
     # The HA API never emits these approvals. They require the separate exact
     # physical checkpoint, not a GUI flag, browser argument or environment value.
-    if [ "$ACTION" != boot-reconcile ] && { ! regular "$STAGE/runtime.expected" ||
+    if [ "$ACTION" != boot-reconcile ] && [ "$ADOPT_AUTH" != 1 ] && { ! regular "$STAGE/runtime.expected" ||
        ! awk -F '\t' '$1=="persistent_write" || $1=="boot_clock_ready" || $1=="recovery_ready" {if($2=="true") n++} END {exit n==3?0:1}' "$STAGE/runtime.expected"; }; then
         emit admission BLOCKED_PERSISTENT_ACTIVATION
         exit 78
@@ -441,7 +447,7 @@ case "$ACTION" in
         runtime_start || die boot_start_failed_voice_unavailable
         emit boot_active VERIFIED; exit 0;;
 esac
-if [ "$ACTION" = install ]; then
+if [ "$ACTION" = install ] || [ "$ACTION" = adopt ]; then
     secure_path "$STATE/proposed.sha256.new"
     regular "$STAGE/bundle.sha256" && regular "$STAGE/approved-manifest.sha256" || die manifest_missing
     [ "$(sha "$STAGE/bundle.sha256")" = "$(cat "$STAGE/approved-manifest.sha256")" ] || die manifest_pin_mismatch
@@ -471,6 +477,16 @@ if [ "$ACTION" = install ]; then
         mode_is "$STAGE/enrollment/$name" -rw------- || die enrollment_permissions
     done
     if [ "$FIXTURE" != 1 ] || [ "${INTERCOM_PROCESS_FIXTURE:-0}" = 1 ]; then runtime_admit; fi
+    if [ "$ACTION" = adopt ]; then
+        # Transfer only the released stopped pair; never relabel an arbitrary build.
+        pair_record | cmp -s "$STAGE/expected.sha256" - || die adoption_pair_changed
+        for name in application S99ha-speaker bootstrap.sh; do
+            case "$name" in application) path=$APP;; S99ha-speaker) path=$INIT;; *) path=$HELPER;; esac
+            [ "$(sha "$path")" = "$(sha "$STAGE/$name")" ] || die adoption_pair_mismatch
+        done
+        regular "$STATE/current.ref" && regular "$STATE/engine.sh" || die adoption_journal_missing
+        [ "$FIXTURE" = 1 ] || [ "$(sha "$STATE/engine.sh")" = 12695864f090495cdceda2bbac0be4d9a27d5bad306e3dc82b191d54f0b7f6a1 ] || die adoption_engine_mismatch
+    else
     # Public helpers must be exactly those admitted by the HA artifact catalog.
     if regular "$STATE/engine.sh"; then
         [ "$(sha "$STATE/engine.sh")" = "$(sha "$0")" ] || die engine_update_not_supported
@@ -483,14 +499,15 @@ if [ "$ACTION" = install ]; then
     if regular "$BOOT"; then [ "$(sha "$BOOT")" = "$(sha "$STAGE/S98intercom-recover")" ] || die existing_recovery_hook;
     else [ ! -e "$BOOT" ] && [ ! -L "$BOOT" ] || die existing_recovery_hook; atomic_copy "$STAGE/S98intercom-recover" "$BOOT" 755; fi
     seam recovery_hook_installed
+    fi
 fi
-if [ "$ACTION" != install ] && { [ "$FIXTURE" != 1 ] || [ "${INTERCOM_PROCESS_FIXTURE:-0}" = 1 ]; }; then runtime_admit; fi
+if [ "$ACTION" != install ] && [ "$ACTION" != adopt ] && { [ "$FIXTURE" != 1 ] || [ "${INTERCOM_PROCESS_FIXTURE:-0}" = 1 ]; }; then runtime_admit; fi
 snapshot_current "$OP"
-if [ ! -e "$STATE/stock.ref" ]; then
+if [ "$ACTION" != adopt ] && [ ! -e "$STATE/stock.ref" ]; then
     [ "$ACTION" = install ] || die not_installed
     atomic_text "$STATE/stock.ref" "$OP"
 fi
-if [ "$ACTION" = install ]; then
+if [ "$ACTION" = install ] || [ "$ACTION" = adopt ]; then
     awk '$2=="application" || $2=="S99ha-speaker" || $2=="bootstrap.sh"' "$STAGE/bundle.sha256" > "$STATE/proposed.sha256.new"
     validate_record "$STATE/proposed.sha256.new"
     mv -f "$STATE/proposed.sha256.new" "$STATE/proposed.sha256"
@@ -504,13 +521,15 @@ fi
 sync
 atomic_text "$STATE/pending" "$OP"; seam journal_written
 quiesce; seam voice_stopped
-if [ "$ACTION" = install ]; then
+if [ "$ACTION" = install ] || [ "$ACTION" = adopt ]; then
     mkdir -p "$STATE/private"; chmod 700 "$STATE/private"
     for name in $PRIVATE_NAMES; do atomic_copy "$STAGE/enrollment/$name" "$STATE/private/$name" 600; done
     seam private_replaced
+    if [ "$ACTION" = install ]; then
     atomic_copy "$STAGE/bootstrap.sh" "$HELPER" 700; seam helper_replaced
     atomic_copy "$STAGE/S99ha-speaker" "$INIT" 755; seam init_replaced
     atomic_copy "$STAGE/application" "$APP" 755; seam application_replaced
+    fi
 else apply_snapshot "$chosen"; fi
 if ! adopt_start_verify; then
     recover_pending || die automatic_rollback_failed

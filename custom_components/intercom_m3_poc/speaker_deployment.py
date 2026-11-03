@@ -446,7 +446,7 @@ async def stage_permanent_package(target, credentials, package, package_sha256, 
 
 
 async def permanent_action(target, credentials, operation_id, action):
-    if (action not in {"install", "verify", "activate_boot", "rollback_previous", "restore_stock", "remove", "reconcile"}
+    if (action not in {"adopt", "install", "verify", "activate_boot", "rollback_previous", "restore_stock", "remove", "reconcile"}
             or not re.fullmatch(r"[0-9a-f]{32}", operation_id)):
         raise PreflightError("INVALID_DEPLOYMENT_ACTION")
     # Only the closed enum is appended; no user command/path/URL can enter here.

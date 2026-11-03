@@ -22,7 +22,7 @@ from .speaker_deployment import (SpeakerTarget, EphemeralCredentials, PreflightE
     read_only_preflight, read_private_preferences, stage_permanent_package, permanent_action,
     cleanup_permanent_stage, ApprovedBuild, _validate_target, RAM_SHA256, STOCK_SHA256)
 
-ACTIONS = {"install", "rollback_previous", "restore_stock", "remove"}
+ACTIONS = {"adopt", "install", "rollback_previous", "restore_stock", "remove"}
 PUBLIC_FILES = {"application", "S99ha-speaker", "bootstrap.sh", "transaction.sh",
                 "S98intercom-recover", "attention.wav", "bundle.sha256", "compatibility.json"}
 LIVE_BLOCKERS = ["EXACT_PHYSICAL_CHECKPOINT_REQUIRED", "NATIVE_HA_CLOCK_ACCEPTANCE_REQUIRED",
@@ -344,10 +344,18 @@ class DeploymentManager:
                 reasons={"probe": ["RECONCILIATION_REQUIRED"] if uncertain else [],
                          "prepare": (["PACKAGE_UNAVAILABLE"] if not package else []) + (["RECONCILIATION_REQUIRED"] if uncertain else []),
                          "reconcile": [], **{action: list(LIVE_BLOCKERS) for action in ACTIONS}})
+            row["reasons"]["adopt"] = ["ADOPTION_REVIEW_REQUIRED"]
             if row["firmware_state"]["mode"] == "stock":
                 row["reasons"]["rollback_previous"] = ["PREVIOUS_MATERIAL_UNAVAILABLE"]
+            if (usable and not uncertain and row["operation"]
+                    and row["operation"]["action"] == "adopt"
+                    and row["operation"]["stage"] == "REVIEW_REQUIRED"
+                    and 0 <= time.time() - row["operation"]["prepared_at"] < 900):
+                row["capabilities"]["adopt"] = True
+                row["reasons"]["adopt"] = []
             rows.append(row)
             if device_id in self.blocked_devices:
+                row["capabilities"]["adopt"] = False
                 row["capabilities"]["probe"] = row["capabilities"]["prepare"] = False
                 row["reasons"]["probe"] = row["reasons"]["prepare"] = [self.blocked_devices[device_id]]
             approval = self.approvals.get(device_id)
@@ -361,6 +369,26 @@ class DeploymentManager:
                     row["reasons"][requested] = []
         return {"revision": self.state["revision"], "mode": "permanent", "devices": rows,
                 "limitations": list(ALPHA_LIMITATIONS) + (["STORAGE_UNAVAILABLE"] if self.storage_failed else [])}
+
+    def _adoption_check(self, device_id, metadata):
+        """Only transfer the exact bundled pair, stopped and without a live owner."""
+        catalog, _ = _catalog(self.bundle_root, self.compatibility_pin, self.manifest_pin)
+        if (metadata.prestate.application_sha256 != catalog["application_sha256"]
+                or metadata.prestate.init_sha256 != catalog["files"]["S99ha-speaker"]
+                or metadata.prestate.bootstrap_sha256 != catalog["files"]["bootstrap.sh"]):
+            raise DeploymentError("ADOPTION_BUILD_MISMATCH")
+        if (metadata.prestate.application_mode != "stopped" or metadata.established_6054
+                or metadata.transaction_pending or metadata.configuration_sha256 is None):
+            raise DeploymentError("ADOPTION_STOPPED_BASELINE_REQUIRED")
+        if self._active(device_id) is not None:
+            raise DeploymentError("ADOPTION_ALREADY_MANAGED")
+
+    def _adoption_authorization(self, device_id, operation):
+        return {"schema": 2, "purpose": "adoption", "operation_id": operation["operation_id"],
+            "action": "adopt", "target_binding_sha256": _sha(json.dumps(asdict(self.targets[device_id]),
+                sort_keys=True, separators=(",", ":")).encode()),
+            "prepared_archive_sha256": operation["artifact_sha256"],
+            "expires_epoch": int(time.time()) + 900}
 
     async def probe(self, expected_deployment_revision, device_id):
         return await self._start(expected_deployment_revision, device_id, "probe")
@@ -415,6 +443,8 @@ class DeploymentManager:
                 update = {"current_version": metadata.prestate.application_sha256[:8],
                           "target_version": None, "mode": mode}
                 if preparing:
+                    if operation["action"] == "adopt":
+                        await self.hass.async_add_executor_job(self._adoption_check, device_id, metadata)
                     preferences = await read_private_preferences(target, credentials)
                     material = asyncio.ensure_future(self.hass.async_add_executor_job(
                         self._prepare_files, device_id, operation, target, metadata, preferences))
@@ -426,13 +456,17 @@ class DeploymentManager:
                     operation.update(stage="REVIEW_REQUIRED", reason="EXACT_PHYSICAL_CHECKPOINT_REQUIRED",
                         prepared_at=int(time.time()), artifact_sha256=archive_sha, credential_expires=expiry,
                         target_version=version)
+                    if operation["action"] == "adopt":
+                        operation["reason"] = "ADOPTION_REVIEW_REQUIRED"
                     if mode == "ram":
                         operation["reason"] = "RAM_STOCK_RESTORATION_REQUIRED"
                     update["target_version"] = version
                 else:
                     if operation["action"] == "reconcile" and operation.get("mutation_started"):
                         await self._reconcile_material(device_id, operation, target, credentials, metadata)
-                    operation.update(stage="READY", reason="READ_ONLY_PREFLIGHT_COMPLETE")
+                    reason = ("VOICE_APPLICATION_STOPPED" if operation["action"] == "probe" and metadata.prestate.application_mode == "stopped"
+                              else "READ_ONLY_PREFLIGHT_COMPLETE")
+                    operation.update(stage="READY", reason=reason)
                 async with self.lock:
                     state = deepcopy(self.state)
                     state["devices"][device_id].update(firmware_state=update, operation=operation)
@@ -452,6 +486,18 @@ class DeploymentManager:
 
     async def _reconcile_material(self, device_id, operation, target, credentials, metadata):
         origin = operation.get("reconciles_operation_id")
+        if origin and metadata.prestate.application_mode == "stopped":
+            directory = self.root / device_id / origin
+            record = json.loads(await self.hass.async_add_executor_job(_private_read, directory / "operation.json"))
+            expected = record.get("expected", {})
+            if (record.get("action") == "adopt" and not metadata.transaction_pending
+                    and metadata.configuration_sha256 == record.get("adoption_previous_config_sha256")
+                    and all(getattr(metadata.prestate, key) == expected.get(key)
+                            for key in ("application_sha256", "init_sha256", "bootstrap_sha256"))):
+                await cleanup_permanent_stage(target, credentials, origin)
+                operation["mutation_started"] = False
+                self.reservations.discard(target.host)
+                return
         if not origin or metadata.prestate.application_mode != "system" or metadata.prestate.application_pid == 0:
             raise DeploymentError("RECONCILIATION_REQUIRED")
         if metadata.prestate.application_sha256 != STOCK_SHA256:
@@ -592,7 +638,7 @@ class DeploymentManager:
         material_source = None
         previous_endpoint = None
         target_catalog = catalog
-        version = catalog["version"] if operation["action"] == "install" else (
+        version = catalog["version"] if operation["action"] in {"install", "adopt"} else (
             "stock" if operation["action"] in {"restore_stock", "remove"} else None)
         if operation["action"] == "rollback_previous":
             active = self._active(device_id)
@@ -629,6 +675,8 @@ class DeploymentManager:
                 "init_sha256": target_catalog["files"]["S99ha-speaker"], "bootstrap_sha256": target_catalog["files"]["bootstrap.sh"]}}
         if material_source is not None:
             record["material_source_operation_id"] = material_source
+        if operation["action"] == "adopt":
+            record["adoption_previous_config_sha256"] = metadata.configuration_sha256
         _json_write(directory / "operation.json", record)
         _private_write(directory / "operation.id", (operation["operation_id"] + "\n").encode())
         _private_write(directory / "approved-manifest.sha256", (self.manifest_pin + "\n").encode())
@@ -674,6 +722,14 @@ class DeploymentManager:
         if path is None or not path.exists():
             return None
         value = json.loads(_private_read(path))
+        if operation["action"] == "adopt":
+            expected = self._adoption_authorization(device_id, operation)
+            if (set(value) != set(expected) or any(value[key] != expected[key]
+                    for key in expected if key != "expires_epoch")
+                    or type(value["expires_epoch"]) is not int
+                    or (not accepted_boot and not time.time() < value["expires_epoch"] <= time.time() + 900)):
+                raise DeploymentError("ADOPTION_AUTHORIZATION_MISMATCH")
+            return value
         required = {"schema", "approved", "operation_id", "action", "target_binding_sha256", "compatibility_sha256",
                     "bundle_manifest_sha256", "prepared_archive_sha256", "expires_epoch", "boot_clock_ready", "recovery_ready"}
         binding = _sha(json.dumps(asdict(self.targets[device_id]), sort_keys=True, separators=(",", ":")).encode())
@@ -749,7 +805,10 @@ class DeploymentManager:
             "configuration_sha256": config_sha}
         if ha_low_us - 10_000 < clock["floor_utc_us"]:
             raise DeploymentError("HA_CLOCK_BELOW_ENROLLMENT_FLOOR")
-        record["checkpoint"] = {"persistent_write": True, "boot_clock_ready": True, "recovery_ready": True}
+        adopting = source_operation["action"] == "adopt"
+        record["checkpoint"] = {"persistent_write": not adopting, "boot_clock_ready": not adopting, "recovery_ready": not adopting}
+        if adopting:
+            record["adoption_authorized"] = True
         record["ha_utc_epoch"] = ha_high_us // 1_000_000
         runtime = {"schema": 1, "operation_id": record["operation_id"], "boot_id": metadata.prestate.boot_id,
             "monitor_pid": metadata.prestate.monitor_pid, "monitor_start_ticks": metadata.prestate.monitor_start_ticks,
@@ -758,12 +817,12 @@ class DeploymentManager:
             "application_start_ticks": metadata.prestate.application_start_ticks,
             "application_sha256": metadata.prestate.application_sha256, "pulse_pid": metadata.prestate.pulse_pid,
             "pulse_start_ticks": metadata.prestate.pulse_start_ticks, "pulse_sha256": metadata.prestate.pulse_sha256,
-            "persistent_write": "true", "boot_clock_ready": "true", "recovery_ready": "true",
+            "persistent_write": "false" if adopting else "true", "boot_clock_ready": "false" if adopting else "true", "recovery_ready": "false" if adopting else "true",
             "ha_issued_epoch": record["ha_utc_epoch"], "device_uptime": metadata.uptime_seconds}
         substitutions = {"operation.json": (json.dumps(record, sort_keys=True) + "\n").encode(),
             "runtime.expected": "".join(f"{key}\t{value}\n" for key, value in runtime.items()).encode(),
             "boot-clock.json": (json.dumps(clock, sort_keys=True) + "\n").encode()}
-        if not reactivating and metadata.prestate.application_sha256 != STOCK_SHA256:
+        if not reactivating and not adopting and metadata.prestate.application_sha256 != STOCK_SHA256:
             active = self._active(device_id)
             if active is None:
                 raise DeploymentError("MANAGED_BASELINE_REQUIRED")
@@ -799,6 +858,8 @@ class DeploymentManager:
         async with self.lock:
             self._admit(expected_deployment_revision, device_id)
             operation = self.state["devices"][device_id]["operation"]
+            if device_id in self.blocked_devices:
+                raise DeploymentError("CONFIGURATION_REVIEW_REQUIRED")
             if (action not in ACTIONS or operation is None or operation["operation_id"] != operation_id
                     or operation["action"] != action or operation["stage"] != "REVIEW_REQUIRED"):
                 raise DeploymentError("DEPLOYMENT_BINDING_MISMATCH")
@@ -810,7 +871,12 @@ class DeploymentManager:
             # Same event loop: reserve before the first await prevents new call admission.
             self.reservations.add(host)
             try:
-                approval = await self.hass.async_add_executor_job(self._approval, device_id, operation)
+                if action == "adopt":
+                    if not 0 <= time.time() - operation["prepared_at"] < 900:
+                        raise DeploymentError("ADOPTION_REVIEW_EXPIRED")
+                    approval = self._adoption_authorization(device_id, operation)
+                else:
+                    approval = await self.hass.async_add_executor_job(self._approval, device_id, operation)
                 if approval is None:
                     raise DeploymentError("EXACT_PHYSICAL_CHECKPOINT_REQUIRED")
                 self.approvals[device_id] = approval
@@ -843,6 +909,8 @@ class DeploymentManager:
                 high = time.time_ns() // 1000
                 if metadata.transaction_pending or metadata.established_6054:
                     raise DeploymentError("DEVICE_CONNECTION_BUSY")
+                if operation["action"] == "adopt":
+                    await self.hass.async_add_executor_job(self._adoption_check, device_id, metadata)
                 if operation["action"] == "install":
                     if metadata.prestate.application_mode != "system":
                         raise DeploymentError("RAM_STOCK_RESTORATION_REQUIRED")
@@ -862,16 +930,18 @@ class DeploymentManager:
                 observed = await read_only_preflight(target, credentials, builds)
                 if observed.transaction_pending:
                     raise DeploymentError("DEVICE_TRANSACTION_PENDING")
-                if operation["action"] == "install":
+                if operation["action"] in {"install", "adopt"}:
                     if (observed.prestate.application_sha256 != approved.application_sha256
                             or observed.prestate.init_sha256 != approved.init_sha256
                             or observed.prestate.bootstrap_sha256 != approved.bootstrap_sha256
                             or observed.prestate.application_mode != "system" or observed.prestate.application_pid == 0):
                         raise DeploymentError("DEVICE_ACTIVATION_NOT_VERIFIED")
                     directory = self.root / device_id / operation["operation_id"]
+                    configuration_sha = _sha(await self.hass.async_add_executor_job(_private_read, directory / "enrollment" / "intercom_m3_poc.json"))
+                    if observed.configuration_sha256 != configuration_sha:
+                        raise DeploymentError("DEVICE_ACTIVATION_NOT_VERIFIED")
                     endpoint = json.loads(await self.hass.async_add_executor_job(_private_read, directory / "ha-endpoint.json"))
                     await self.on_installed(device_id, endpoint)
-                    configuration_sha = _sha(await self.hass.async_add_executor_job(_private_read, directory / "enrollment" / "intercom_m3_poc.json"))
                     await self.hass.async_add_executor_job(self._remember_active, device_id, operation, configuration_sha)
                 elif operation["action"] == "rollback_previous":
                     # Restored trust must be matched to its retained HA sidecar, never freshly minted trust.
@@ -962,7 +1032,7 @@ class DeploymentManager:
                 if observed.prestate.application_mode == "stopped" and active is not None:
                     authority = active["approval_operation"]
                     if (authority.get("operation_id") != active["operation_id"]
-                            or authority.get("action") not in {"install", "rollback_previous"}
+                            or authority.get("action") not in {"install", "adopt", "rollback_previous"}
                             or active_record["configuration_sha256"] != active["configuration_sha256"]):
                         raise DeploymentError("BOOT_BINDING_MISMATCH")
                     # Only the committed matching install may reuse its accepted checkpoint for boot.
@@ -1008,7 +1078,7 @@ class DeploymentManager:
                     record_path = directory / "operation.json"
                     if observed.prestate.application_mode == "system" and await self.hass.async_add_executor_job(record_path.exists):
                         record = json.loads(await self.hass.async_add_executor_job(_private_read, record_path))
-                        if record["action"] == "install" and observed.configuration_sha256 == record["configuration_sha256"]:
+                        if record["action"] in {"install", "adopt"} and observed.configuration_sha256 == record["configuration_sha256"]:
                             endpoint = json.loads(await self.hass.async_add_executor_job(_private_read, directory / "ha-endpoint.json"))
                             await self.on_installed(device_id, endpoint)
                             await self.hass.async_add_executor_job(self._remember_active, device_id, operation, observed.configuration_sha256)

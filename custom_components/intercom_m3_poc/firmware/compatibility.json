@@ -1,12 +1,12 @@
 {
   "schema": 1,
-  "version": "alpha-46009f0c-paired-v3",
+  "version": "alpha-46009f0c-adoption-dev",
   "application_sha256": "46009f0cb4f697087d4bab66e0c7039e68f69a784c5717a105c21e92a77f35cd",
   "files": {
     "application": "46009f0cb4f697087d4bab66e0c7039e68f69a784c5717a105c21e92a77f35cd",
     "S99ha-speaker": "0ac20f37ccf2e9129def1f0cb4860456b85bf58e519f6435a8c8cc5cdc685015",
     "bootstrap.sh": "b4956adb0bc7b9d89157966f289594c58c898ba317b07ad8a0ae7cb131f4daea",
-    "transaction.sh": "12695864f090495cdceda2bbac0be4d9a27d5bad306e3dc82b191d54f0b7f6a1",
+    "transaction.sh": "1f267d4c9e0ce6b3c616ff7e74635e82c6db1a2743c5d087c0a9cc23703cd38e",
     "S98intercom-recover": "3284aae2564eb9c534428b29666eee62bbecb07449f7fd850b74b2e5d96abe74",
     "attention.wav": "47320cbb9e7013967a4efdf3925fb5c1f28b5ccfeb69bf6a6f7d71b8cf922286"
   },
