@@ -1,4 +1,4 @@
-import "./panel.js?v=0.4.10-r3";
+import "./panel.js?v=0.5.0b5";
 import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.10-r3";
 
 const pages = ["Overview", "Call", "Rooms", "Speakers", "People", "Announcements", "History", "Settings", "Diagnostics"];

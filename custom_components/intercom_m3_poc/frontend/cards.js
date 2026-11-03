@@ -1,14 +1,15 @@
-import "./manager.js?v=0.4.10-r3";
+import "./manager.js?v=0.5.0b5";
 import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.10-r3";
 
 class IntercomRoomCard extends HTMLElement {
   constructor() { super(); this.attachShadow({ mode: "open" }); this.audio = document.createElement("intercom-m3-poc-panel"); this.shadowRoot.append(this.audio); }
   setConfig(config) {
     if (config.device_id != null && typeof config.device_id !== "string") throw new Error("device_id must be an enrolled device UUID");
+    if (config.compact && !config.device_id) throw new Error("compact call controls require device_id");
     this.config = config; this.audio.setConfig(config);
   }
   set hass(value) { this.audio.hass = value; }
-  getCardSize() { return 7; }
+  getCardSize() { return this.config?.compact ? 2 : 7; }
   static getStubConfig() { return { type: "custom:intercom-room-card" }; }
 }
 
