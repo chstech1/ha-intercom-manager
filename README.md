@@ -2,7 +2,7 @@
 
 **0.5.0b4 development prerelease:** adds SSH pairing adoption for the exact supported stopped speaker without the previous Home Assistant credentials or a user-supplied backup. It preserves the installed firmware and snapshots the actual protected pairing files before replacing them, even when they differ from an old journal snapshot. See [adoption scope and test results](ADOPTION-DEVELOPMENT.md). Live adoption and a bounded authenticated listen-only transport test succeeded; physical sound and reboot/power-loss acceptance remain pending. The 0.4.10 installation and firmware-update limitations documented below remain applicable to those actions.
 
-Version 0.5.0b5 adds compact dashboard call controls: green Call while idle, red Hangup during a call and a Mute/Unmute button. Add `/intercom_m3_poc/cards.js?v=0.5.0b5` as a JavaScript module resource and use `custom:intercom-room-card` with `device_id` and `compact: true`. Calls retain the existing authenticated media path and microphone cleanup.
+Version 0.5.0b6 adds compact dashboard call controls: green Call while idle, red Hangup during a call and a Mute/Unmute button. Add `/intercom_m3_poc/cards.js?v=0.5.0b6` as a JavaScript module resource and use `custom:intercom-room-card` with `device_id` and `compact: true`. Calls retain the existing authenticated media path and microphone cleanup.
 
 Home Assistant integration with a sidebar for room enrollment, permissions, calls, announcements, history and diagnostics.
 

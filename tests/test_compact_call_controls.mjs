@@ -25,4 +25,5 @@ nodes.get('#hang').onclick();assert.equal(hung,1);
 p.callId=null;p.inflight=false;p.softMuted=false;p.status='USER_HANGUP';p.render();
 assert.equal(nodes.get('#call').hidden,false);assert.equal(nodes.get('#hang').hidden,true);assert.equal(nodes.get('#mute').hidden,true);
 assert.equal(nodes.get('#status').textContent,'Ready to call');
+p.status='PANEL_REMOVED';p.render();assert.equal(nodes.get('#status').textContent,'Ready to call');
 console.log('PASS compact call, hangup, mute/unmute and cleanup reuse the real call handlers');

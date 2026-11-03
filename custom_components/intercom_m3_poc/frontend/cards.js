@@ -1,4 +1,4 @@
-import "./manager.js?v=0.5.0b5";
+import "./manager.js?v=0.5.0b6";
 import { IntercomManagerClient, managerError, escapeHtml as esc, roomState } from "./client.js?v=0.4.10-r3";
 
 class IntercomRoomCard extends HTMLElement {
