@@ -27,6 +27,8 @@ The permanent startup design waits for fresh authenticated Home Assistant time a
 
 Simulation permits interface preparation without a live speaker. Treat a room's reported availability as current status, not a guarantee of physical audio, microphone or indicator health. Assist setup is outside this package's installation procedure.
 
+**Physical speaker installation is not yet a complete public self-service workflow.** Simulation and read-only speaker checks are available, but persistent actions require an exact action-bound physical checkpoint. This release does not provide a general checkpoint creator or a fully validated backup, managed-device transfer and recovery guide. The review checkbox does not supply that checkpoint. See [Installation](INSTALLATION.md), [Development](DEVELOPMENT.md), and [Testing](TESTING.md).
+
 ## Install through HACS
 
 1. Back up Home Assistant and inventory any existing `custom_components/intercom_m3_poc` directory and Intercom Manager entry before adopting this package. Preserve the exact previous code and integration data; do not overwrite a manual installation without an agreed migration.
@@ -65,3 +67,5 @@ To remove it, end calls, preserve any required history/metadata backup, then rem
 Do not attach private keys, certificates, tokens, complete configuration dumps, household IP addresses or conversation audio to public issues. Share minimal redacted diagnostics in [ha-intercom-manager issues](https://github.com/chstech1/ha-intercom-manager/issues).
 
 Project-authored integration, frontend, helpers, tone and icon are licensed under [Apache-2.0](LICENSE). See [NOTICE.md](NOTICE.md) and [THIRD_PARTY.json](THIRD_PARTY.json) for upstream provenance and third-party license notices.
+
+For source provenance, offline tests, and deployment limitations, see [SOURCE.md](SOURCE.md).

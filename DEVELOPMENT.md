@@ -1,0 +1,13 @@
+# Development
+
+The current development alpha is [v0.4.10](https://github.com/chstech1/ha-intercom-manager/releases/tag/v0.4.10), commit `caf9a3fa285765cc996e7e25d3016d6e8c635fac`. Its 44-file release includes 37 Home Assistant component files and an eight-file speaker kit. The kit contains public application and startup artifacts, not a device's private credentials or configuration. See [NOTICE.md](NOTICE.md), [THIRD_PARTY.json](THIRD_PARTY.json) and the release for the corresponding speaker application source and upstream notices.
+
+The Home Assistant component implements authenticated room control, a frontend and profile-4 native endpoint transport. The installed speaker application and HA exchange mutually authenticated traffic; HTTP/browser admission, owner/lease generations, mute, timing and cleanup are part of the boundary. Device enrollment credentials are private to each HA installation. A management SSH connection is distinct from the native endpoint profile and its paired trust.
+
+The 0.4.10 recovery candidate preserves a valid HA call through a narrowly eligible native disconnect using a fresh native connection and indication. Capture/playback epoch fences discard old queued media. Recovery attempts are bounded and require fresh healthy progress and a new physical transition before rearming. Existing firmware and paired PKI are unchanged from the prior release; synthetic checks are not proof of real TLS, physical unmute or acoustic behavior.
+
+Source upload does not by itself make speaker installation or managed transfer self-service. See [INSTALLATION.md](INSTALLATION.md) for the missing action-bound checkpoint and recovery path. Do not weaken trust or privacy checks to make a local demo pass.
+
+Home Assistant Core 2026.10.0 or later, its `probatio` dependency, the component's pinned `asyncssh` requirement, Python and Node are relevant to development. AArch64 firmware builds use the reviewed vendor SDK/toolchain and source transforms. Exact supported compiler, container, inputs, dependencies and reproducible public commands must be verified against the accompanying source and test inventory before treating a build as reproducible. The upstream [Third Reality source repository](https://github.com/thirdreality/voice-music-assistant) documents its own stock build; those commands alone do not establish a reproducible build of this modified application. Do not flash a build merely because it compiles.
+
+Keep real device identifiers, private network addresses, authentication material, private configuration, speech and private evidence out of commits and public issues. Review source and license/provenance for every file actually distributed.

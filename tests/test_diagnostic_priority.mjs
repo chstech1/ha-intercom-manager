@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
+import {TextEncoder} from 'node:util';
+const c=vm.createContext({TextEncoder,HTMLElement:class{},setTimeout,clearTimeout,clearInterval});
+const src=readFileSync(new URL('../custom_components/intercom_m3_poc/frontend/panel.js',import.meta.url),'utf8');
+vm.runInContext(src+'\nglobalThis.sendForTest=sendCallDiagnostic;',c);
+function connection(){let pending=0,max=0;const requests=[],slots=[];return {requests,slots,get max(){return max},sendMessagePromise(m){requests.push(m);pending++;max=Math.max(max,pending);return new Promise((resolve,reject)=>slots.push({resolve:()=>{pending--;resolve({})},reject:()=>{pending--;reject(Error('closed'))}}))}}}
+const progress=n=>({type:'intercom_native/call_diagnostic',playback_frames:n,playback_epoch:'0123456789ABCDEF'});
+const con=connection();c.sendForTest(con,progress(1));
+for(let i=2;i<200;i++)c.sendForTest(con,progress(i));
+assert.equal(con.requests.length,1);
+c.sendForTest(con,{type:'intercom_native/call_diagnostic',snapshot:'five-second'},true);
+assert.equal(con.requests.length,1);
+con.slots[0].resolve();await new Promise(setImmediate);
+assert.equal(con.requests.length,2);assert.equal(con.requests[1].snapshot,'five-second');
+for(let i=0;i<30;i++)c.sendForTest(con,progress(i));
+c.sendForTest(con,{type:'intercom_native/call_diagnostic',snapshot:'ordinary'},true);
+c.sendForTest(con,{type:'intercom_native/call_diagnostic',terminal:true,snapshot:'terminal'});
+c.sendForTest(con,{type:'intercom_native/call_diagnostic',snapshot:'late-ordinary'},true);
+assert.equal(con.requests.length,2);
+con.slots[1].resolve();await new Promise(setImmediate);
+assert.equal(con.requests.length,3);assert.equal(con.requests[2].snapshot,'terminal');
+assert.equal(con.max,1,'at most one pending request');
+con.slots[2].resolve();await new Promise(setImmediate);
+assert.equal(con.requests.length,3);
+console.log('PASS: one pending; bounded coalescing preserves five-second and terminal priority');

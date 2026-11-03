@@ -1,0 +1,155 @@
+# SOURCE REFERENCE ONLY: intentionally disabled and redacted. NOT AN INSTALLATION PROCEDURE.
+# Per-install bindings, paths and evidence are placeholders. Do not run or adapt this
+# into checkpoint authority without independent design, security review and evidence.
+raise RuntimeError("SOURCE_REFERENCE_ONLY_DO_NOT_EXECUTE")
+
+"""Cross-link the combined audio overlay in a disposable network-none builder.
+
+Read-only pinned vendor/SDK mounts; exports an uninstalled ELF for review.
+This is neither a firmware image nor an installation command.
+"""
+import datetime
+import hashlib
+import json
+from pathlib import Path
+import argparse
+import subprocess
+import base64
+
+ROOT = Path(__file__).resolve().parent
+REPO = next(p for p in ROOT.parents if (p / "IMPLEMENTATION_PLAN.md").exists())
+EVIDENCE = Path("<EVIDENCE_PATH_REMOVED>")
+IMAGE = "sha256:b39f7d027489859ca71c761fa15c043bc4631bfb627ab1df13296bda643366ad"
+SOURCE = "<PRIVATE_BUILD_SOURCE_PATH_REMOVED>"
+SDK = SOURCE + "/output/3reality_trspk/host"
+VENDOR = SOURCE + "/buildroot/package/thirdreality/linux-voice-assistant-cpp"
+NAME = "<CONTAINER_NAME_REMOVED>"
+M4_NAMES = ("endpoint_frame.h", "endpoint_controller.h", "endpoint_session.h",
+            "endpoint_tls.h", "endpoint_tls.cpp", "endpoint_vendor.h", "endpoint_vendor.cpp")
+RUNNER = r'''import base64,hashlib,json,os,pathlib,shutil,struct,subprocess,sys,tempfile
+spec=json.load(sys.stdin)
+def tree_hash(root):
+    rows=[p.relative_to(root).as_posix()+chr(0)+hashlib.sha256(p.read_bytes()).hexdigest()
+          for p in sorted(root.rglob('*')) if p.is_file()]
+    return hashlib.sha256('\n'.join(rows).encode()).hexdigest()
+source=pathlib.Path('/vendor'); before=tree_hash(source)
+with tempfile.TemporaryDirectory(prefix='intercom_m56_',dir='/tmp') as directory:
+    root=pathlib.Path(directory);app=root/'app';shutil.copytree(source,app)
+    for name,data in spec['files'].items():
+        relative=pathlib.PurePosixPath(name)
+        assert not relative.is_absolute() and '..' not in relative.parts
+        path=root/relative;path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text(data,encoding='utf-8')
+    for name,data in spec.get('binary_files',{}).items():
+        relative=pathlib.PurePosixPath(name)
+        assert not relative.is_absolute() and '..' not in relative.parts
+        path=root/relative;path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(base64.b64decode(data,validate=True))
+    env=os.environ.copy();env['PATH']='/sdk/bin:'+env.get('PATH','')
+    sysroot='/sdk/aarch64-buildroot-linux-gnu/sysroot'
+    env['PKG_CONFIG_SYSROOT_DIR']=sysroot
+    env['PKG_CONFIG_LIBDIR']=sysroot+'/usr/lib/pkgconfig:'+sysroot+'/usr/share/pkgconfig'
+    env['PKG_CONFIG_PATH']=''
+    commands=[];outputs=[]
+    def run(command,timeout):
+        commands.append(command)
+        result=subprocess.run(command,cwd=app,env=env,text=True,capture_output=True,timeout=timeout)
+        outputs.append(result.stdout+result.stderr)
+        if result.returncode:
+            print(json.dumps({'commands':commands,'outputs':outputs,'exit_code':result.returncode}),flush=True)
+            raise SystemExit(result.returncode)
+        return result.stdout
+    run(['python3',str(root/'vendor/apply_overlay.py'),'--vendor',str(app),'--m4',str(root/'m4')],30)
+    build=root/'build'
+    run(['cmake','-S',str(app),'-B',str(build),'-DCMAKE_TOOLCHAIN_FILE=/sdk/share/buildroot/toolchainfile.cmake',
+         '-DCMAKE_BUILD_TYPE=Release'],180)
+    run(['cmake','--build',str(build),'--target','linux-voice-assistant-cpp','-j2'],600)
+    binary=build/'linux-voice-assistant-cpp';data=binary.read_bytes()
+    assert data[:6]==bytes([127,69,76,70,2,1]) and struct.unpack_from('<H',data,18)[0]==183
+    dynamic=run(['/sdk/bin/aarch64-none-linux-gnu-readelf','-d',str(binary)],30)
+    assert all(name in dynamic for name in ('libpulse.so','libssl.so.3','libcrypto.so.3'))
+    after=tree_hash(source);assert before==after
+    print(json.dumps({'commands':commands,'outputs':outputs,'vendor_tree_sha256':before,
+        'vendor_tree_unchanged':before==after,'binary':{'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),
+        'format':'ELF64 little-endian AArch64','dynamic':dynamic},'binary_base64':base64.b64encode(data).decode(),
+        'exit_code':0}),flush=True)
+'''
+
+
+def main():
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--evidence',type=Path,default=EVIDENCE)
+    args=parser.parse_args()
+    evidence=args.evidence.resolve()
+    files = {"m4/" + n: (REPO / "poc/milestone4" / n).read_text(encoding="utf-8") for n in M4_NAMES}
+    overlay = ROOT / "overlay"
+    assert (overlay / "apply_overlay.py").exists(), "Firmware overlay not ready"
+    files.update({"vendor/" + p.name: p.read_text(encoding="utf-8") for p in overlay.iterdir()
+                  if p.is_file() and p.suffix in (".h", ".cpp", ".py")
+                  and not p.name.startswith(("check_", "run_"))})
+    sources = {n: hashlib.sha256(data.encode()).hexdigest() for n, data in files.items()}
+    raw_hashes = {n: hashlib.sha256(((REPO / "poc/milestone4" / n[3:]) if n.startswith("m4/")
+                                  else overlay / n[7:]).read_bytes()).hexdigest() for n in files}
+    binary_files={"vendor/"+p.relative_to(overlay).as_posix():base64.b64encode(p.read_bytes()).decode()
+                  for p in (overlay/'third_party').rglob('*') if p.is_file()}
+    binary_hashes={n:hashlib.sha256(base64.b64decode(v)).hexdigest() for n,v in binary_files.items()}
+    commands = []
+
+    def docker(args, **kwargs):
+        command = ["wsl.exe", "-d", "<WSL_DISTRO_REMOVED>", "--", "docker"] + args
+        commands.append(command)
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8", **kwargs)
+
+    assert docker(["container", "inspect", NAME], timeout=20).returncode != 0, "Existing container preserved"
+    create = docker(["create", "-i", "--name", NAME, "--network", "none", "--read-only", "--user", "1000:1000",
+                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128", "--memory", "2g", "--cpus", "2",
+                     "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g",
+                     "--mount", "type=bind,source=" + SDK + ",target=/sdk,readonly",
+                     "--mount", "type=bind,source=" + VENDOR + ",target=/vendor,readonly",
+                     "--mount", "type=bind,source=" + SOURCE + ",target=/build,readonly",
+                     "--entrypoint", "python3", IMAGE, "-c", RUNNER], timeout=30)
+    create.check_returncode()
+    record = {"milestones": [5, 6], "gate": "isolated combined audio implementation open; physical/production writes closed",
+              "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(), "image": IMAGE, "source_hashes": raw_hashes,
+              "normalized_input_hashes": sources, "result": "FAIL", "device_or_live_service_changes": False}
+    evidence.mkdir(parents=True, exist_ok=True)
+    record['binary_input_hashes']=binary_hashes
+    try:
+        info = json.loads(docker(["inspect", NAME], timeout=20).stdout)[0]
+        assert info['Image'] == IMAGE and info['HostConfig']['NetworkMode'] == 'none' and info['HostConfig']['ReadonlyRootfs']
+        assert info['Config']['User'] == '1000:1000' and info['HostConfig']['CapDrop'] == ['ALL']
+        assert not info['HostConfig'].get('Devices') and not info['HostConfig'].get('PortBindings')
+        assert all(not m['RW'] for m in info['Mounts'])
+        result = docker(["start", "-ai", NAME], input=json.dumps({"files": files,"binary_files":binary_files}), timeout=900)
+        state = json.loads(docker(["inspect", NAME], timeout=20).stdout)[0]["State"]
+        record.update(cli_exit=result.returncode, container_exit=state['ExitCode'], oom_killed=state['OOMKilled'])
+        try:
+            witness = json.loads(result.stdout)
+        except ValueError:
+            witness = {"output": result.stdout}
+        encoded = witness.pop("binary_base64", None)
+        (evidence / "vendor-build-check.txt").write_text(json.dumps(witness, indent=2) + "\n" + result.stderr, encoding="utf-8")
+        if encoded and result.returncode == state['ExitCode'] == 0 and not state['OOMKilled']:
+            binary = base64.b64decode(encoded, validate=True)
+            assert hashlib.sha256(binary).hexdigest() == witness['binary']['sha256']
+            target = evidence / "artifacts/linux-voice-assistant-cpp-m56-poc"
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(binary)
+            record.update(result="PASS", linked_binary=witness['binary'], artifact_path=target.relative_to(REPO).as_posix(),
+                          vendor_tree_sha256=witness['vendor_tree_sha256'], vendor_tree_unchanged=witness['vendor_tree_unchanged'])
+    finally:
+        removed = docker(["rm", "-f", NAME], timeout=30)
+        absent = docker(["container", "inspect", NAME], timeout=20).returncode != 0
+        record.update(commands=commands, removal_exit=removed.returncode, container_absent=absent,
+                      source_unchanged_after_check=raw_hashes == {n: hashlib.sha256(((REPO / "poc/milestone4" / n[3:]) if n.startswith("m4/")
+                                             else overlay / n[7:]).read_bytes()).hexdigest() for n in files}
+                      and binary_hashes == {n:hashlib.sha256((overlay/n[7:]).read_bytes()).hexdigest() for n in binary_files})
+        if record['result'] == 'PASS' and not record['source_unchanged_after_check']:
+            record['result'] = 'STALE_SOURCE_SNAPSHOT'
+        (evidence / "vendor-build-result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    assert record['result'] == 'PASS' and record['container_absent'] and record['removal_exit'] == 0 and record['source_unchanged_after_check'], "See vendor build evidence"
+    print(json.dumps({k: record[k] for k in ('result', 'artifact_path', 'source_unchanged_after_check', 'container_absent')}))
+
+
+if __name__ == "__main__":
+    main()

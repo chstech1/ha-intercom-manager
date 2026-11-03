@@ -1,0 +1,86 @@
+# SOURCE REFERENCE ONLY: disabled, redacted historical one-off. NOT AN INSTALLATION PROCEDURE.
+# Bindings and attestations are undefined placeholders, not evidence or defaults.
+raise RuntimeError("SOURCE_REFERENCE_ONLY_DO_NOT_EXECUTE")
+
+"""Review candidate: one production C333 install checkpoint; no device action."""
+import ast, hashlib, json, os, stat, tarfile, time, uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from cryptography import x509
+from cryptography.x509.oid import ExtensionOID
+
+if not __debug__: raise RuntimeError('OPTIMIZED_MODE_REFUSED')
+root = ROOT_PATH_PLACEHOLDER
+entry = ENTRY_PLACEHOLDER
+device = DEVICE_PLACEHOLDER
+opid = OPID_PLACEHOLDER
+archive = ARCHIVE_PLACEHOLDER
+operation_sha = OPERATION_SHA_PLACEHOLDER
+compat = COMPAT_PLACEHOLDER
+manifest = MANIFEST_PLACEHOLDER
+config_sha = CONFIG_SHA_PLACEHOLDER
+sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+
+# Reuse the exact installed 0.4.2 private-file helpers without importing HA into the add-on.
+source = root/'custom_components/intercom_m3_poc/manager_deployment.py'
+assert sha(source) == HASH_BINDING_PLACEHOLDER
+tree = ast.parse(source.read_text(encoding='utf8'))
+names = {'_private_directory', '_private_write', '_private_read', '_json_write'}
+nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+assert len(nodes) == len(names) and {node.name for node in nodes} == names
+class DeploymentError(Exception): pass
+MAX_PRIVATE_JSON = 32768
+exec(compile(ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[])), str(source), 'exec'))
+
+private = root/'intercom_m3_poc_deployment'/entry/device
+directory = private/opid
+target = TARGET_BINDING_PLACEHOLDER
+assert hashlib.sha256(json.dumps(target,sort_keys=True,separators=(',',':')).encode()).hexdigest() == HASH_BINDING_PLACEHOLDER
+assert private.parent.resolve()==private.parent and stat.S_IMODE(private.parent.stat().st_mode)==0o700 and private.parent.stat().st_uid==os.geteuid()
+enrollment = json.loads(_private_read(private/'enrollment.json'))
+assert enrollment['target']==target and isinstance(enrollment['password'],str) and enrollment['password']
+state = json.loads((root/('.storage/intercom_m3_poc.deployment.'+entry)).read_bytes())['data']
+assert state['revision']==REVISION_PLACEHOLDER and set(state['devices'])=={device}
+row = state['devices'][device]; op = row['operation']
+assert op['operation_id']==opid and op['action']=='install' and op['stage']=='REVIEW_REQUIRED' and op['mutation_started'] is False and op['artifact_sha256']==archive
+assert row['firmware_state']['mode']=='stock'
+assert sha(directory/'operation.json')==operation_sha
+record = json.loads(_private_read(directory/'operation.json'))
+assert record['operation_id']==opid and record['action']=='install' and record['prepared_deployment_revision']==PREPARED_REVISION_PLACEHOLDER
+assert record['compatibility_sha256']==compat and record['bundle_manifest_sha256']==manifest and record['configuration_sha256']==config_sha
+expected = EXPECTED_PRESTATE_PLACEHOLDER
+assert all(record['expected'].get(key)==value for key,value in expected.items())
+build = TARGET_BUILD_PLACEHOLDER
+assert record['target_build']==build and op['credential_expires']==record['credential_expires']
+assert datetime.fromisoformat(record['credential_expires'])==EXPIRY_PLACEHOLDER
+assert sha(directory/'device-stage.tar')==archive and sha(directory/'compatibility.json')==compat and sha(directory/'bundle.sha256')==manifest
+assert hashlib.sha256(_private_read(directory/'enrollment/intercom_m3_poc.json')).hexdigest()==config_sha
+with tarfile.open(directory/'device-stage.tar') as sealed:
+    assert record==json.load(sealed.extractfile('operation.json'))
+    for line in (directory/'bundle.sha256').read_text().splitlines():
+        digest,name=line.split('  ')
+        assert name in {'application','S99ha-speaker','bootstrap.sh','transaction.sh','S98intercom-recover','attention.wav'}
+        assert hashlib.sha256(sealed.extractfile(name).read()).hexdigest()==digest and sha(directory/name)==digest
+manager=json.loads((root/('.storage/intercom_m3_poc.manager.'+entry)).read_bytes())['data']
+assert manager['configuration']['rooms']==[] and manager['endpoint_profiles']=={}
+certs={name:x509.load_pem_x509_certificate(_private_read(directory/'enrollment'/(name+'.pem'))) for name in ('ca','endpoint','ha')}
+ca_ski=certs['ca'].extensions.get_extension_for_oid(ExtensionOID.SUBJECT_KEY_IDENTIFIER).value.digest
+for certificate in certs.values():
+    ski=certificate.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_KEY_IDENTIFIER); aki=certificate.extensions.get_extension_for_oid(ExtensionOID.AUTHORITY_KEY_IDENTIFIER)
+    assert not ski.critical and not aki.critical and ski.value.digest==x509.SubjectKeyIdentifier.from_public_key(certificate.public_key()).digest and aki.value.key_identifier==ca_ski
+# The original one-off referenced a separately staged recovery witness; its path and binding are removed.
+witness=WITNESS_PATH_PLACEHOLDER
+assert sha(witness)==HASH_BINDING_PLACEHOLDER
+witness_epoch=WITNESS_EPOCH_PLACEHOLDER
+assert 0 <= time.time()-witness_epoch <= 900
+checkpoint=private/'physical-checkpoint.json'
+assert not checkpoint.exists() and not checkpoint.is_symlink() and not (directory/'accepted-checkpoint.json').exists() and not (directory/'accepted-checkpoint.json').is_symlink()
+expiry=min(int(datetime.fromisoformat(record['credential_expires']).timestamp())-300,int(time.time())+7*86400-300)
+assert expiry>int(time.time())
+authority={'schema':1,'approved':OPERATOR_ATTESTATION_REQUIRED,'operation_id':opid,'action':'install',
+ 'target_binding_sha256':HASH_BINDING_PLACEHOLDER,
+ 'compatibility_sha256':compat,'bundle_manifest_sha256':manifest,'prepared_archive_sha256':archive,
+ 'expires_epoch':expiry,'boot_clock_ready':OPERATOR_ATTESTATION_REQUIRED,'recovery_ready':OPERATOR_ATTESTATION_REQUIRED}
+_json_write(checkpoint,authority)
+assert json.loads(_private_read(checkpoint))==authority
+print(json.dumps({'status':'CHECKPOINT_STAGED_GUI_EXECUTE_REQUIRED','operation_id':opid,'checkpoint_sha256':sha(checkpoint),'expires_epoch':expiry,'device_action':False}))

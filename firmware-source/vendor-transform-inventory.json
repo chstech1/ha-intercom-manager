@@ -1,0 +1,89 @@
+{
+  "upstream_commit": "bf9f6838c432685ea8d6b01e9197e9eeedf59426",
+  "vendor_tree_sha256": "ad1daf7851642a86ffb7593b833657e7b77ed2bd09c1a5d6c5f88f0218cc48fd",
+  "modified": {
+    "CMakeLists.txt": {
+      "before": "59fd3a02f8db11fa9af770ce46623b2cd8499da2604c0aec37f55321f183ceee",
+      "after": "bb69678d82c95498a141999831ca47f50a8cee647147e11b24df6da899285213"
+    },
+    "src/audio/LibMpvPlayer.cpp": {
+      "before": "089410fe2d568eb141ab65640bc6ae8dea31dd81afae09d098990c62ac2d103a",
+      "after": "ffa61fd048f3781087b1435f0a1889018ba0c5c9f74099c4494480a2cc742e91"
+    },
+    "src/audio/LibMpvPlayer.h": {
+      "before": "1beb8d0fb80181c624ec2ba66aff20ae76a6fe8379b63cef0e0398ff8b576ec8",
+      "after": "ca86ab89cca6912f10ca581b79a96228bc0ae97c69911cb86f7c23938708abd7"
+    },
+    "src/audio/PcmRingBuffer.cpp": {
+      "before": "822dccefb87c236e44a8167ad8f366ca4f4217bf4ca046a72d4337529ae1ccb6",
+      "after": "dc56bfb2283a4a7b51dd76ae25d46a97d0e6ffd4b89812d0ce71ba9aa3ab8aa7"
+    },
+    "src/audio/PcmRingBuffer.h": {
+      "before": "1d0d4af58f684b6062eadd6c0f713e942312d06079673fb7b19fb47c7ac9845c",
+      "after": "b6dfdaa5d8958ab83fa0e7a79f3bddf0011ba200a4597679e4c1e10410015809"
+    },
+    "src/audio/WebRtcProcessor.cpp": {
+      "before": "38e853b09dc10dd8af0bb04c9400867f370b2855b0c30e0e6320d178de57a327",
+      "after": "e2e0ba6cbd0aa5f49174998b2fba661acc35ea3b1dc0e0bc5dc64505cc87cada"
+    },
+    "src/audio/WebRtcProcessor.h": {
+      "before": "b2a7558a9a96e780134e698fdce9da1c8e3ff7b19fcf8141f9a29ba21009391d",
+      "after": "0a0bca0de9e7efef52d79828a9d4d5f1d6484c4d26417aec6339b79c33f58d3b"
+    },
+    "src/entities/MediaPlayerEntity.cpp": {
+      "before": "c5309a0f5d587f12699f8a714ab0e8b42710a48d171f58f0d180fa5ebe156f61",
+      "after": "4e324c27e3d1cf8e3ad6b69c8e50398f0fdc1d8609ad583b3f21fe210bf843dc"
+    },
+    "src/main.cpp": {
+      "before": "d508c4e197f146d170aa57253dd51ec81f0f834db0dd8ab992e79221bddddc7d",
+      "after": "17e6b4cfa44a5fe9e3778a0815a991ff97db4a857e50a08dc6fdcdad81603f9d"
+    },
+    "src/satellite/Satellite.cpp": {
+      "before": "16a4f2eede7c5f1c344d5190fd23580eaa972dd147c3071b8ee2bda8879d9080",
+      "after": "5f6b05e0f0a7d26c5a627649902644f24712740d6432390c7beb95b040c86574"
+    },
+    "src/satellite/Satellite.h": {
+      "before": "33c7cf51a5471d121214238b4d82ab3f739ade76c400e4b6df92b805bcf0997f",
+      "after": "7ae721786014a47eca556e71ac4714e637527e66e3ccda21c68cb98d52b192fe"
+    },
+    "src/tr/HomeButton.cpp": {
+      "before": "71471e2b0633970fd6778ffe8a7cb7ebefea2f3a18d238984807dfaa4ca6eb13",
+      "after": "a1b719e9c27757aee05b795e5a4d570c08cf20ae2049276a08f385584d63bfe4"
+    },
+    "src/tr/HomeButton.h": {
+      "before": "95dbc629090b882fd156ca672a899f68b516a1a105637e5cc821c37aa03cc3e2",
+      "after": "382ee8e39b143a7c7a2e98c1b405aee9da365c08160836ebd3719da7fdc8d04a"
+    },
+    "src/tr/LedRing.cpp": {
+      "before": "96623521ac4b16cfe3530d25b510095f3c30d65a2ae395909d608cb084213ca8",
+      "after": "9a6fa51a5efa5222734fc6a1a8d29726dfba277162329e014b0882b8b0dacf60"
+    },
+    "src/tr/LedRing.h": {
+      "before": "4a429599c294ea559e15104eb3e2e9cdb485614f3f39c6497282ac872e2f6b51",
+      "after": "df752b1f89ba42a8c9e3fdd4d4fa52f9fabb88c438b12ab10cdb3da66ff257c6"
+    }
+  },
+  "added": {
+    "src/intercom/boot_clock.cpp": "8db0e9d16b3f323b2f0bbfc4c61b5aecc5fa7d43f8ae3b99d4f7b191192680a2",
+    "src/intercom/boot_clock.h": "3c55733fe7167450ba50d38c47a9f35ffd6d5cad82238cb14d59b480ea7c89ce",
+    "src/intercom/capture_accumulator.h": "e2233a3cd33188279d8b90702598355648e36d4889692684f3b4ecfcaf58898d",
+    "src/intercom/endpoint_audio_runtime.cpp": "cbde503753f9bb29cd30b43ed677738b35b5548f6b943e586ad7ee1323f4c2df",
+    "src/intercom/endpoint_audio_runtime.h": "976837d6b2bec4e731012b49d044802c414e70916eda546732176c4cd359b5f0",
+    "src/intercom/endpoint_controller.h": "9ca60c72ac3ae68c01c6b1aaac0892c61f6e87ffff7d7d64b50746879e95aa80",
+    "src/intercom/endpoint_frame.h": "141ea3413d5b37c8658d81a730288d67188080ac729ae64cde58a07ced079038",
+    "src/intercom/endpoint_id.h": "795e63291629d942ef94518f84b8ddf8da44ed1598d4a6ab2c7e3d27186d4664",
+    "src/intercom/endpoint_manager_controls.h": "770f731564813ad926405352c4aac10408164710cba313fc209e5a043ef24fb2",
+    "src/intercom/endpoint_session.h": "e5bdc1323915e825f3e90385f971aee5429c896072fa43ad6de469f8f967474d",
+    "src/intercom/endpoint_tls.cpp": "9d765409f449367142e356dbc16182b46108c2a87d06be6dcf8928b3db71483a",
+    "src/intercom/endpoint_tls.h": "02b147246c12d9d2de2734e1ff6074db5f35a74fe2204a01454d8f9fbdb7b9a3",
+    "src/intercom/endpoint_vendor.cpp": "418d64d6e16ec18cd9a353ef62c0d8ef49bd9642e202ce318525e9798979a123",
+    "src/intercom/endpoint_vendor.h": "57113fd1d7c85d3116bf28e7d64950b1f5093d5c2c7699af923678f499ee8afd",
+    "src/intercom/ha_clock.h": "16c74723444bab5067a8b3cad0d9ddee1e8f5ff1de874a056e8e9f19ce096159",
+    "src/intercom/manager_volume.h": "f78ec5e3840f782f34edaad46028d28f36f60c4acdcd9f9a9c66a07903484d94",
+    "src/intercom/pulse_sink.cpp": "2ffcd546b6516b51087796d0dcbc9cc500e67feed7e4f7720af0a17c6558ed91",
+    "src/intercom/pulse_sink.h": "28d4bfc8a88682a2f9a53f61bc2da90675e0180a521f362ba03543f08330a0f2",
+    "src/intercom/resident_button.h": "8defe5f7ef00b4f9280bd1bced4253b464f43f31bffe249d0782d668073c46d0",
+    "src/intercom/upgrade_indication.h": "e426ddfff5151ed4d0b9748c5a7bf00e68292f2f42b847a5482b31b12895b2ce"
+  },
+  "removed": []
+}

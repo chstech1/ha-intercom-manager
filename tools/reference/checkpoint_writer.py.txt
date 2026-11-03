@@ -1,0 +1,126 @@
+# SOURCE REFERENCE ONLY: intentionally disabled and redacted. NOT AN INSTALLATION PROCEDURE.
+# Per-install bindings, paths and evidence are placeholders. Do not run or adapt this
+# into checkpoint authority without independent design, security review and evidence.
+raise RuntimeError("SOURCE_REFERENCE_ONLY_DO_NOT_EXECUTE")
+
+import argparse, hashlib, json, os, stat, sys, tarfile, time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Removed bindings: base and backup paths; entry, device, operation and previous
+# operation IDs; target identity and host key; prestate; package/record hashes.
+# Placeholder names are deliberately undefined.
+BASE = BASE_PATH_PLACEHOLDER
+ENTRY = ENTRY_ID_PLACEHOLDER
+DEVICE = DEVICE_ID_PLACEHOLDER
+OP = OPERATION_ID_PLACEHOLDER
+OLD = PREVIOUS_OPERATION_ID_PLACEHOLDER
+ROOT = BASE / 'intercom_m3_poc_deployment' / ENTRY / DEVICE
+DIR = ROOT / OP
+BACKUP = BACKUP_PATH_PLACEHOLDER
+ARCHIVE = ARCHIVE_HASH_PLACEHOLDER
+RECORD = RECORD_HASH_PLACEHOLDER
+COMPAT = COMPAT_HASH_PLACEHOLDER
+MANIFEST = MANIFEST_HASH_PLACEHOLDER
+NEWAPP = NEW_APP_HASH_PLACEHOLDER
+OLDAPP = OLD_APP_HASH_PLACEHOLDER
+TARGET = TARGET_BINDING_PLACEHOLDER
+PRESTATE = PRESTATE_BINDING_PLACEHOLDER
+
+def require(condition, code):
+    if not condition: raise ValueError(code)
+
+def sha(data): return hashlib.sha256(data).hexdigest()
+def read(path): return path.read_bytes()
+def obj(path): return json.loads(read(path))
+
+def check(args):
+    now = time.time()
+    require(args.witness_epoch <= now < args.witness_epoch + 900, 'WITNESS_EXPIRED_OR_FUTURE')
+    require(ROOT.resolve() == ROOT and ROOT.is_dir(), 'UNSAFE_ROOT')
+    info = ROOT.stat()
+    require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700, 'UNSAFE_ROOT_MODE')
+    state = obj(BASE / '.storage' / ('intercom_m3_poc.deployment.' + ENTRY))['data']
+    require(state['revision'] == args.revision, 'REVISION_CHANGED')
+    operation = state['devices'][DEVICE]['operation']
+    require(operation['operation_id'] == OP and operation['action'] == 'install'
+        and operation['stage'] == 'REVIEW_REQUIRED' and operation.get('mutation_started') is False
+        and operation.get('artifact_sha256') == ARCHIVE, 'OPERATION_CHANGED')
+    require(not (DIR / 'accepted-checkpoint.json').exists(), 'OPERATION_ALREADY_ACCEPTED')
+    enrollment = obj(ROOT / 'enrollment.json')
+    require(enrollment['target'] == TARGET and bool(enrollment['password']), 'TARGET_CHANGED')
+    record_bytes = read(DIR / 'operation.json'); record = json.loads(record_bytes)
+    require(sha(record_bytes) == RECORD and record['operation_id'] == OP and record['action'] == 'install'
+        and record['prepared_deployment_revision'] == PREPARED_REVISION_PLACEHOLDER and record['compatibility_sha256'] == COMPAT
+        and record['bundle_manifest_sha256'] == MANIFEST
+        and all(record['expected'].get(k) == v for k,v in PRESTATE.items()), 'PREPARED_RECORD_CHANGED')
+    require(sha(read(DIR/'device-stage.tar')) == ARCHIVE and sha(read(DIR/'application')) == NEWAPP
+        and sha(read(DIR/'compatibility.json')) == COMPAT and sha(read(DIR/'bundle.sha256')) == MANIFEST,
+        'PREPARED_PACKAGE_CHANGED')
+    cfg = obj(DIR/'enrollment/intercom_m3_poc.json')
+    clock = obj(ROOT/'clock-state.json')
+    require(sha(read(DIR/'enrollment/intercom_m3_poc.json')) == record['configuration_sha256']
+        and cfg['device_uuid'] == DEVICE and cfg['profile'] == 4 and cfg['enabled'] is True
+        and record['clock'] == clock and cfg['ha_clock_generation'] == clock['generation']
+        and cfg['ha_clock_floor_utc_us'] == clock['floor_utc_us']
+        and cfg['ha_clock_rate_ppb'] == 1000000 and 0 < clock['floor_utc_us'] <= int(now * 1000000),
+        'CLOCK_OR_CONFIG_CHANGED')
+    require(datetime.fromisoformat(record['credential_expires']) == CREDENTIAL_EXPIRY_PLACEHOLDER, 'EXPIRY_CHANGED')
+    active = obj(ROOT/'active-install.json'); old = ROOT/OLD
+    require(active['operation_id'] == OLD and sha(read(old/'application')) == OLDAPP
+        and active['configuration_sha256'] == sha(read(old/'enrollment/intercom_m3_poc.json')),
+        'OLD_PAIR_CHANGED')
+    oldrecord = obj(old/'operation.json')
+    require(datetime.fromisoformat(oldrecord['credential_expires']).timestamp() > now + 300, 'OLD_IDENTITY_EXPIRED')
+    require(read(BACKUP/'source.sha256') == read(BACKUP/'copy.sha256'), 'BACKUP_INVENTORY_CHANGED')
+    # Compare old retained private bytes to the already inventoried backup archive, without printing them.
+    old_files = ['application','operation.json','ha-endpoint.json','enrollment/ca.pem','enrollment/endpoint.pem',
+                 'enrollment/endpoint.key','enrollment/ha.pem','enrollment/ha.key','enrollment/intercom_m3_poc.json']
+    prefix = 'intercom_m3_poc_deployment/' + ENTRY + '/' + DEVICE + '/' + OLD + '/'
+    with tarfile.open(BACKUP/'project.tar', 'r:') as tar:
+        members = {m.name.removeprefix('./'):m for m in tar if m.isfile()}
+        for name in old_files:
+            member = members.get(prefix+name)
+            require(member is not None and sha(tar.extractfile(member).read()) == sha(read(old/name)), 'BACKUP_PAIR_MISMATCH')
+    checkpoint = ROOT/'physical-checkpoint.json'
+    require(not checkpoint.is_symlink() and (old/'accepted-checkpoint.json').is_file()
+        and not (old/'accepted-checkpoint.json').is_symlink(), 'UNSAFE_OR_MISSING_OLD_AUTHORITY')
+    if checkpoint.exists():
+        previous = obj(checkpoint)
+        require(previous.get('operation_id') == OLD, 'CHECKPOINT_NOT_PRIOR_OPERATION')
+        require(read(checkpoint) == read(old/'accepted-checkpoint.json'), 'PRIOR_CHECKPOINT_MISMATCH')
+    # Only the independently verified fresh witness can establish physical and recovery conditions.
+    expiry = min(int(args.witness_epoch + 900), int(now + 900))
+    require(expiry > now + 10, 'WITNESS_NEAR_EXPIRY')
+    return {'schema':1,'approved':OPERATOR_ATTESTATION_REQUIRED,'operation_id':OP,'action':'install',
+        'target_binding_sha256':sha(json.dumps(TARGET,sort_keys=True,separators=(',',':')).encode()),
+        'compatibility_sha256':COMPAT,'bundle_manifest_sha256':MANIFEST,'prepared_archive_sha256':ARCHIVE,
+        'expires_epoch':expiry,'boot_clock_ready':OPERATOR_ATTESTATION_REQUIRED,'recovery_ready':OPERATOR_ATTESTATION_REQUIRED}
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--witness-epoch', required=True, type=int)
+    parser.add_argument('--revision', required=True, type=int)
+    parser.add_argument('--apply', action='store_true')
+    args = parser.parse_args()
+    try:
+        approval = check(args)
+        if args.apply:
+            # Recheck immediately before the single protected atomic replacement.
+            approval = check(args)
+            tmp = ROOT / ('.new-checkpoint-' + os.urandom(16).hex())
+            try:
+                fd = os.open(tmp, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd,'wb') as f:
+                    f.write((json.dumps(approval,sort_keys=True,separators=(',',':'))+'\n').encode()); f.flush(); os.fsync(f.fileno())
+                os.replace(tmp, ROOT/'physical-checkpoint.json')
+            finally:
+                if tmp.exists(): tmp.unlink()
+        print(json.dumps({'result':'CHECKPOINT_WRITTEN' if args.apply else 'CHECK_PASS_NO_WRITES',
+                          'operation_id':OP,'expires_epoch':approval['expires_epoch']}))
+    except Exception as exc:
+        print(json.dumps({'result':'HOLD','reason':str(exc) if isinstance(exc, ValueError) else type(exc).__name__}))
+        return 1
+    return 0
+
+if __name__ == '__main__': sys.exit(main())
