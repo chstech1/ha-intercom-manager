@@ -328,7 +328,20 @@ async def _run_fixed(target, credentials, command, input_data=None, duration=Non
                 stderr = group.create_task(bounded_read(process.stderr))
             await process.wait_closed()
             if (process.exit_status != 0 and not (allow_gate and process.exit_status == 78)) or stderr.result():
-                raise PreflightError("REMOTE_PREFLIGHT_FAILED")
+                # Only fixed public codes cross the diagnostic boundary, never raw stderr.
+                codes = {"adoption_engine_mismatch": "ADOPTION_ENGINE_MISMATCH",
+                    "adoption_journal_missing": "ADOPTION_JOURNAL_MISSING",
+                    "adoption_pair_mismatch": "ADOPTION_BUILD_MISMATCH",
+                    "stage_not_empty": "ADOPTION_STAGING_CONFLICT",
+                    "stopped_voice_not_admitted": "ADOPTION_STOPPED_BASELINE_REQUIRED",
+                    "private_permissions": "DEVICE_PRIVATE_PERMISSIONS",
+                    "unmanaged_current_pair": "DEVICE_JOURNAL_PAIR_MISMATCH",
+                    "unmanaged_current_private": "DEVICE_JOURNAL_PRIVATE_MISMATCH",
+                    "candidate_start_failed_restored": "ADOPTION_START_FAILED_RESTORED"}
+                reason = stderr.result().decode("ascii", errors="replace").strip()
+                prefix = "permanent-alpha: "
+                code = codes.get(reason[len(prefix):]) if reason.startswith(prefix) else None
+                raise PreflightError(code or "REMOTE_PREFLIGHT_FAILED")
             return process.exit_status, stdout.result()
     except TimeoutError:
         raise PreflightError("TIMEOUT") from None
@@ -367,7 +380,7 @@ STAGE_COMMAND = r"""set -eu
 [ "$(id -u)" = 0 ]
 umask 077
 stage=/tmp/intercom-permanent-alpha
-[ ! -e "$stage" ] && [ ! -L "$stage" ]
+[ ! -e "$stage" ] && [ ! -L "$stage" ] || { printf 'permanent-alpha: stage_not_empty\n' >&2; exit 31; }
 mkdir "$stage"
 chmod 700 "$stage"
 tar -xf - -C "$stage"
