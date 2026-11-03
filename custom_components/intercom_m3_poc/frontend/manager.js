@@ -286,7 +286,7 @@ export class IntercomManagerPanel extends HTMLElement {
     const device = this.deployment?.devices.find(value => value.device_id === this.selectedSpeaker);
     if (!this.snapshot?.is_admin || this.page !== "Speakers" || this.deploymentBusy || !device) return;
     if (!["probe", "prepare", "execute", "reconcile"].includes(kind) || device.capabilities[kind === "execute" ? action : kind] !== true) return;
-    if (["prepare", "execute"].includes(kind) && !["install", "rollback_previous", "restore_stock", "remove"].includes(action)) return;
+    if (["prepare", "execute"].includes(kind) && !["adopt", "install", "rollback_previous", "restore_stock", "remove"].includes(action)) return;
     if (kind === "execute" && (device.operation?.stage !== "REVIEW_REQUIRED" || device.operation.review_required !== true || device.operation.action !== action || device.operation.operation_id !== operationId || !this.deploymentReviewReady(device) || !this.content("Speakers").querySelector("#deployment-confirm")?.checked)) return;
     const epoch = this.epoch, request = this.deploymentRequest = Symbol(), revision = this.deployment.revision;
     const payload = { device_id: device.device_id, expected_deployment_revision: revision, ...(["prepare", "execute"].includes(kind) ? { action } : {}), ...(kind === "execute" ? { operation_id: operationId } : {}) };
