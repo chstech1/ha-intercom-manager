@@ -11,7 +11,7 @@ TX = Path(__file__).resolve().parents[1] / 'custom_components/intercom_m3_poc/fi
 PRIVATE = ('ca.pem', 'endpoint.pem', 'endpoint.key', 'intercom_m3_poc.json', 'sound.json')
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
 
-def run(fail=False, crash=None):
+def run(fail=False, crash=None, private_drift=False):
     with tempfile.TemporaryDirectory(prefix='intercom-permanent-fixture.', dir='/tmp') as tmp:
         root = Path(tmp)
         state = root/'data/intercom-m56-install'
@@ -61,6 +61,10 @@ def run(fail=False, crash=None):
             put(stage/'transaction.sh',source,0o700)
             manifest=''.join(f'{sha(stage/name)}  {name}\n' for name in ('application','S99ha-speaker','bootstrap.sh','transaction.sh','S98intercom-recover','attention.wav'))
             put(stage/'bundle.sha256',manifest); put(stage/'approved-manifest.sha256',sha(stage/'bundle.sha256')+'\n')
+        if private_drift:
+            for name in PRIVATE: put(state/'private'/name,'actual '+name)
+            refused=subprocess.run(['/bin/sh',str(runner),'preflight'],env=os.environ|{'INTERCOM_FIXTURE_ROOT':tmp},capture_output=True,text=True)
+            assert refused.returncode!=0 and 'unmanaged_current_private' in refused.stderr
         before = {p: p.read_bytes() for p in (app,init,helper,state/'engine.sh',state/'stock.ref')}
         env = os.environ | {'INTERCOM_FIXTURE_ROOT': tmp}
         if crash: env['INTERCOM_FIXTURE_CRASH']=crash
@@ -83,11 +87,13 @@ def run(fail=False, crash=None):
             assert json.loads(result.stdout)['status']=='VERIFIED'
         for p, data in before.items(): assert p.read_bytes()==data, p
         for name in PRIVATE:
-            assert (state/'private'/name).read_text()==('old ' if fail or crash else 'new ')+name
+            assert (state/'private'/name).read_text()==(('actual ' if private_drift else 'old ') if fail or crash else 'new ')+name
         assert not (state/'pending').exists()
 
 run()
 run(fail=True)
+run(private_drift=True)
+run(fail=True,private_drift=True)
 for seam in ('journal_written','private_replaced','start_verified','previous_committed','current_committed'):
     run(crash=seam)
 print('PASS: adoption changes only private pairing; failed starts and process-interruption seams using the original recovery engine restore the old stopped state')

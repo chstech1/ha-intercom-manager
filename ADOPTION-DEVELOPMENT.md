@@ -1,4 +1,4 @@
-# Existing speaker adoption candidate — 0.5.0b1
+# Existing speaker adoption candidate — 0.5.0b4
 
 This development build adds **Speakers → Pair existing speaker with this Home Assistant → Prepare pairing**. It uses the existing protected SSH management connection. The owner does not supply an old backup, old Home Assistant identity, or old intercom credentials. New initial SSH connection setup still requires the device address and verified SSH identity; this build does not implement address or SSH-key discovery.
 
@@ -23,3 +23,7 @@ Adoption authorization has a separate schema and purpose. It binds the prepared 
 Install the candidate integration on Home Assistant and reload that integration. Prepare pairing for the selected speaker; inspect any eligibility failure without forcing it. After the owner confirms the precise pairing replacement, execute it and verify a real native TLS connection and the resulting room. Assign the intended room and check permitted users. With a person at the speaker, verify two-way sound, mute indication, unmute chime and hangup. HA restart, speaker reboot and real power-loss tests remain separate, unperformed acceptance work.
 
 At publication, this build has not been accepted on a physical speaker. Successful offline checks do not establish physical sound, TLS reconnection, privacy indicators, restart or power-loss behavior. Future firmware upgrades and general unknown-firmware conversion are outside this candidate.
+
+## Live findings during prerelease validation
+
+The initial live attempt was refused before room enrollment because the current private pairing files differed from the old journal snapshot. Version 0.5.0b4 lets the distinct adoption action validate and snapshot the actual protected files, while retaining the mismatch refusal for normal installation. Tests cover this transfer and restoring the actual prior bytes after failed startup; no successful physical adoption is claimed by this change.

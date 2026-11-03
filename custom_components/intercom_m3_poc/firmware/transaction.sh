@@ -134,7 +134,14 @@ check_current() {
     if regular "$STATE/current.ref"; then
         read_ref current.ref
         pair_record | cmp -s - "$STATE/snapshots/$ref/pair.sha256" || die unmanaged_current_pair
-        private_record | cmp -s - "$STATE/snapshots/$ref/private.sha256" || die unmanaged_current_private
+        if [ "$ACTION" = adopt ]; then
+            # Ownership transfer starts from the actual protected files. Their
+            # old trust need not match the old HA's snapshot. snapshot_current
+            # captures these exact bytes before replacing any pairing files.
+            private_record >/dev/null
+        else
+            private_record | cmp -s - "$STATE/snapshots/$ref/private.sha256" || die unmanaged_current_private
+        fi
     fi
 }
 fixture_service() {
