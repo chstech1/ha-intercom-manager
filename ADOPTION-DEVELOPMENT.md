@@ -18,12 +18,18 @@ Adoption authorization has a separate schema and purpose. It binds the prepared 
 - All 21 existing Python checks and 8 Node checks passed using the documented dependency versions.
 - Python/JavaScript/shell syntax and package digests were checked. The pairing review was rendered and its disabled-to-enabled checkbox behavior checked in a clearly labeled local simulated GUI.
 
-## Remaining live acceptance
+## Live validation
 
-Install the candidate integration on Home Assistant and reload that integration. Prepare pairing for the selected speaker; inspect any eligibility failure without forcing it. After the owner confirms the precise pairing replacement, execute it and verify a real native TLS connection and the resulting room. Assign the intended room and check permitted users. With a person at the speaker, verify two-way sound, mute indication, unmute chime and hangup. HA restart, speaker reboot and real power-loss tests remain separate, unperformed acceptance work.
+The 0.5.0b4 candidate was installed through HACS and exercised against an existing supported speaker on a new Home Assistant deployment. Adoption completed with `DEVICE_ACTION_VERIFIED`; the room was enrolled, named and available over the native authenticated connection. No previous HA credentials or owner-supplied backup were used.
 
-At publication, this build has not been accepted on a physical speaker. Successful offline checks do not establish physical sound, TLS reconnection, privacy indicators, restart or power-loss behavior. Future firmware upgrades and general unknown-firmware conversion are outside this candidate.
+A bounded listen-only browser test used synthetic silence for uplink without requesting the browser microphone. The native call reached `ACTIVE_FULL` with fresh clocks and sustained endpoint capture, endpoint sink and browser rendering progress. Hangup terminated the call and the room returned to idle. These counters establish transport and processing progress, not audible speech or acoustic quality. Remote playback queue drops were observed; physical sound and listening quality remain unverified.
+
+Call permissions remain explicit per Home Assistant user. Administrator configuration visibility alone does not grant a browser call; review **People & permissions** for the account that will use the room.
+
+## Remaining physical acceptance
+
+With a person at the speaker, verify sound, microphone pickup, mute indication and unmute chime. HA restart after adoption, speaker reboot and real power-loss tests remain unperformed. Future firmware upgrades and general unknown-firmware conversion are outside this candidate.
 
 ## Live findings during prerelease validation
 
-The initial live attempt was refused before room enrollment because the current private pairing files differed from the old journal snapshot. Version 0.5.0b4 lets the distinct adoption action validate and snapshot the actual protected files, while retaining the mismatch refusal for normal installation. Tests cover this transfer and restoring the actual prior bytes after failed startup; no successful physical adoption is claimed by this change.
+The initial live attempt was refused before room enrollment because the current private pairing files differed from the old journal snapshot. Version 0.5.0b4 lets the distinct adoption action validate and snapshot the actual protected files, while retaining the mismatch refusal for normal installation. Tests cover this transfer and restoring the actual prior bytes after failed startup. Live adoption and the transport test subsequently succeeded as described above.

@@ -1,6 +1,6 @@
 # Intercom Manager
 
-**0.5.0b4 development prerelease:** adds SSH pairing adoption for the exact supported stopped speaker without the previous Home Assistant credentials or a user-supplied backup. It preserves the installed firmware and snapshots the actual protected pairing files before replacing them, even when they differ from an old journal snapshot. See [adoption scope and test results](ADOPTION-DEVELOPMENT.md). Physical acceptance remains pending. The 0.4.10 installation and firmware-update limitations documented below remain applicable to those actions.
+**0.5.0b4 development prerelease:** adds SSH pairing adoption for the exact supported stopped speaker without the previous Home Assistant credentials or a user-supplied backup. It preserves the installed firmware and snapshots the actual protected pairing files before replacing them, even when they differ from an old journal snapshot. See [adoption scope and test results](ADOPTION-DEVELOPMENT.md). Live adoption and a bounded authenticated listen-only transport test succeeded; physical sound and reboot/power-loss acceptance remain pending. The 0.4.10 installation and firmware-update limitations documented below remain applicable to those actions.
 
 Home Assistant integration with a sidebar for room enrollment, permissions, calls, announcements, history and diagnostics.
 
